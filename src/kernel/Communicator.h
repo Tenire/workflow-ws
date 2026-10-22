@@ -29,9 +29,12 @@
 #include "list.h"
 #include "poller.h"
 
+struct CommConnEntry;
 class CommConnection
 {
 public:
+	CommConnEntry *entry = nullptr;
+
 	virtual ~CommConnection() { }
 };
 
@@ -123,6 +126,13 @@ private:
 	struct CommConnEntry *entry;
 
 public:
+public:
+	long long seq{0};                      /* only channel */
+	class CommSession *session = nullptr; /* only channel */
+
+	void set_seq(long long seq) { this->seq = seq; }
+	long long get_seq() const { return this->seq; }
+
 	virtual ~CommMessageIn() { }
 	friend class Communicator;
 };
@@ -143,27 +153,37 @@ private:
 	virtual int first_timeout() { return 0; }
 	virtual void handle(int state, int error) = 0;
 
+public:
+	long long get_seq() const { return this->seq; }
+	void set_seq(long long seq) { this->seq = seq; }
+
 protected:
 	CommTarget *get_target() const { return this->target; }
 	CommConnection *get_connection() const { return this->conn; }
 	CommMessageOut *get_message_out() const { return this->out; }
 	CommMessageIn *get_message_in() const { return this->in; }
-	long long get_seq() const { return this->seq; }
+
+	/* for client channel only */
+	virtual bool is_channel() { return false; }
+	CommMessageOut **get_out() { return &this->out; }
+	CommMessageIn **get_in() { return &this->in; }
+	CommConnection **get_conn() { return &this->conn; }
+
+protected:
+	CommTarget *target;
 
 private:
-	CommTarget *target;
 	CommConnection *conn;
 	CommMessageOut *out;
 	CommMessageIn *in;
 	long long seq;
-
 private:
 	struct timespec begin_time;
 	int timeout;
 	int passive;
 
 public:
-	CommSession() { this->passive = 0; }
+	CommSession() : target(nullptr), conn(nullptr), out(nullptr), in(nullptr), seq(0), timeout(0), passive(0) { }
 	virtual ~CommSession();
 	friend class CommMessageIn;
 	friend class Communicator;
@@ -177,6 +197,8 @@ public:
 	void deinit();
 
 	int drain(int max);
+
+	virtual bool is_channel() { return false; }
 
 public:
 	void get_addr(const struct sockaddr **addr, socklen_t *addrlen) const
@@ -296,6 +318,9 @@ public:
 
 	int io_bind(IOService *service);
 	void io_unbind(IOService *service);
+	int channel_send_one(CommSession *session);
+	void channel_shutdown(CommSession *session);
+
 
 public:
 	int is_handler_thread() const;
@@ -314,6 +339,8 @@ private:
 
 private:
 	CommEventHandler *event_handler;
+	int channel_send_callback(CommSession *session);
+
 
 private:
 	int create_poller(size_t poller_threads);

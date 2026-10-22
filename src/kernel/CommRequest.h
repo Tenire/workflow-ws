@@ -39,6 +39,7 @@ public:
 	void set_request_object(CommSchedObject *object) { this->object = object; }
 	int get_wait_timeout() const { return this->wait_timeout; }
 	void set_wait_timeout(int timeout) { this->wait_timeout = timeout; }
+	CommScheduler *get_scheduler() const { return this->scheduler; }
 
 public:
 	virtual void dispatch()
