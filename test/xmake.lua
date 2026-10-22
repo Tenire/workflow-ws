@@ -1,9 +1,14 @@
 set_group("test")
 set_default(false)
+set_languages("c++17")
+
 
 add_requires("gtest")
 
 add_deps("workflow")
+add_linkdirs(get_config("workflow_lib"))
+add_links("workflow")
+
 
 add_packages("gtest")
 add_links("gtest_main")
@@ -33,6 +38,9 @@ for _, test in ipairs(all_tests()) do
     target(test[1])
     set_kind("binary")
     add_files(test[2])
+    add_deps("workflow")
+    add_linkdirs(get_config("workflow_lib"))
+    add_links("workflow")
     if has_config("memcheck") then
         on_run(function (target)
             local argv = {}

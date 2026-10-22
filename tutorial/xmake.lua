@@ -4,6 +4,9 @@ set_default(false)
 if not is_plat("macosx") then
     add_ldflags("-lrt")
 end
+add_linkdirs(get_config("workflow_lib"))
+add_links("workflow")
+
 
 function all_examples()
     local res = {}

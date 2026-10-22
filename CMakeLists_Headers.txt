@@ -97,6 +97,18 @@ set(INCLUDE_HEADERS
 	src/nameservice/WFDnsResolver.h
 	src/nameservice/WFServiceGovernance.h
 	src/nameservice/UpstreamPolicies.h
+	src/protocol/WebSocketMessage.h
+	src/protocol/websocket_parser.h
+	src/protocol/StreamMessage.h
+	src/protocol/stream_parser.h
+	src/server/WFWebSocketServer.h
+	src/server/WFStreamServer.h
+	src/client/WFWebSocketClient.h
+	src/client/WFStreamClient.h
+	src/factory/WFChannel.h
+	src/factory/WFChannel.inl
+	src/factory/WFChannelMsg.h
+	src/factory/WebSocketChannelImpl.h
 )
 
 if(KAFKA STREQUAL "y")

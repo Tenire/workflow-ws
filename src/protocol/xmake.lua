@@ -7,7 +7,12 @@ target("basic_protocol")
               "DnsUtil.cc",
               "http_parser.c",
               "HttpMessage.cc",
-              "HttpUtil.cc")
+              "HttpUtil.cc",
+              "TLVMessage.cc",
+              "websocket_parser.c",
+              "WebSocketMessage.cc",
+              "stream_parser.c",
+              "StreamMessage.cc")
 
 target("mysql_protocol")
     if has_config("mysql") then
