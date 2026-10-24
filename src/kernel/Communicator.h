@@ -26,8 +26,9 @@
 #include <stddef.h>
 #include <pthread.h>
 #include <openssl/ssl.h>
-#include "list.h"
+#include "StreamReply.h"
 #include "poller.h"
+#include "list.h"
 
 struct CommConnEntry;
 class CommConnection
@@ -95,6 +96,7 @@ public:
 	virtual ~CommTarget() { }
 	friend class CommServiceTarget;
 	friend class Communicator;
+	friend class StreamReply;
 };
 
 class CommMessageOut
@@ -151,8 +153,11 @@ private:
 	virtual int receive_timeout() { return -1; }
 	virtual int keep_alive_timeout() { return 0; }
 	virtual int first_timeout() { return 0; }
+
 	virtual void handle(int state, int error) = 0;
 
+public:
+	class StreamReply *start_stream_reply(bool chunked = false);
 public:
 	long long get_seq() const { return this->seq; }
 	void set_seq(long long seq) { this->seq = seq; }
@@ -187,6 +192,7 @@ public:
 	virtual ~CommSession();
 	friend class CommMessageIn;
 	friend class Communicator;
+	friend class StreamReply;
 };
 
 class CommService
@@ -308,6 +314,7 @@ public:
 
 	int push(const void *buf, size_t size, CommSession *session);
 
+
 	int shutdown(CommSession *session);
 
 	int bind(CommService *service);
@@ -355,6 +362,22 @@ private:
 						  struct CommConnEntry *entry);
 	int send_message_async(struct iovec vectors[], int cnt,
 						   struct CommConnEntry *entry);
+
+	int send_message_loop(struct iovec vectors[], int cnt,
+						  struct CommConnEntry *entry);
+	int send_message_done(struct CommConnEntry *entry);
+	static StreamReply *start_stream_reply(CommSession *session, bool chunked);
+	static int stream_submit(StreamReply *stream, const struct iovec *iov,
+							 int iovcnt, bool finish,
+							 void (*callback)(void *, int), void *context);
+	static void stream_abort(StreamReply *stream);
+	void stream_result(struct poller_result *res);
+	static int stream_arm(StreamReply::Impl *impl, const struct iovec *iov, int count, bool replace);
+	static int stream_watch(StreamReply::Impl *impl);
+	static void stream_fail(StreamReply::Impl *impl, int error);
+	static void stream_release(StreamReply::Impl *impl);
+	static void stream_destroy(CommSession *session);
+	bool stream_reply_done(CommSession *session);
 
 	int send_message(struct CommConnEntry *entry);
 
@@ -430,6 +453,9 @@ private:
 
 public:
 	virtual ~Communicator() { }
+	friend class CommSession;
+	friend class StreamReply;
+	friend class CommServiceTarget;
 };
 
 #endif

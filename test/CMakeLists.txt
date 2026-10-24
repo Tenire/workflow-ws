@@ -46,6 +46,7 @@ set(TEST_LIST
 	dns_unittest
 	resource_unittest
 	uriparser_unittest
+	stream_reply_unittest
 )
 
 if (APPLE)

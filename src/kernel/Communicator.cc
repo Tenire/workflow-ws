@@ -26,8 +26,8 @@
 #include <unistd.h>
 #include <stddef.h>
 #include <stdlib.h>
+#include <stdio.h>
 #include <string.h>
-#include <pthread.h>
 #include <openssl/ssl.h>
 #include "list.h"
 #include "msgqueue.h"
@@ -53,18 +53,45 @@ struct CommConnEntry
 #define CONN_STATE_CLOSING		6
 #define CONN_STATE_ERROR		7
 #define CONN_STATE_ESTABLISHED 8 /* for channel */
+#define CONN_STATE_STREAMING	9 /* streaming reply waits for data */
 	int state;
 	int error;
 	int ref;
+	struct StreamReply *stream_reply;
 	struct iovec *write_iov;
 	poller_ssl_t *ssl;
 	CommSession *session;
 	CommTarget *target;
 	CommService *service;
 	mpoller_t *mpoller;
+	Communicator *communicator;
 	/* Connection entry's mutex is for client session only. */
 	pthread_mutex_t mutex;
 };
+
+struct StreamReply::Impl
+{
+	Communicator *comm;
+	CommSession *session;
+	CommConnEntry *entry;
+	StreamReply *handle;
+	Impl *next;
+	struct iovec vectors[2050];
+	int count;
+	char prefix[32];
+	bool chunked;
+	bool headers_pending;
+	bool operation_pending;
+	bool finishing;
+	bool finished;
+	bool node_active;
+	bool detached;
+	int error;
+	int references;
+	void (*callback)(void *, int);
+	void *context;
+};
+
 
 static inline int __set_fd_nonblock(int fd)
 {
@@ -181,6 +208,7 @@ static void __release_conn(struct CommConnEntry *entry)
 		free(SSL_get_app_data(poller_ssl_get_SSL(entry->ssl)));
 		poller_ssl_destroy(entry->ssl);
 	}
+	free(entry->write_iov);
 
 	close(entry->sockfd);
 	free(entry);
@@ -358,6 +386,8 @@ public:
 private:
 	int sockfd;
 	int ref;
+public:
+	StreamReply::Impl *streams = NULL;
 
 private:
 	CommService *service;
@@ -409,6 +439,7 @@ CommSession::~CommSession()
 	target = (CommServiceTarget *)this->target;
 	if (!this->out && target->has_idle_conn())
 		target->shutdown();
+	Communicator::stream_destroy(this);
 
 	target->decref();
 }
@@ -477,9 +508,6 @@ void Communicator::shutdown_service(CommService *service)
 int Communicator::send_message_sync(struct iovec vectors[], int cnt,
 									struct CommConnEntry *entry)
 {
-	CommSession *session = entry->session;
-	CommService *service;
-	int timeout;
 	ssize_t n;
 	int i;
 
@@ -520,8 +548,14 @@ int Communicator::send_message_sync(struct iovec vectors[], int cnt,
 		cnt -= i;
 	}
 
-	if (cnt != 0)
-		return cnt;
+	return cnt;
+}
+
+int Communicator::send_message_done(struct CommConnEntry *entry)
+{
+	CommSession *session = entry->session;
+	CommService *service;
+	int timeout;
 
 	if (entry->is_channel > 0)
 	{
@@ -631,6 +665,7 @@ int Communicator::send_message_async(struct iovec vectors[], int cnt,
 	if (ret < 0)
 	{
 		free(entry->write_iov);
+		entry->write_iov = NULL;
 		if (entry->state != CONN_STATE_RECEIVING)
 			return -1;
 	}
@@ -643,7 +678,6 @@ int Communicator::send_message_async(struct iovec vectors[], int cnt,
 int Communicator::send_message(struct CommConnEntry *entry)
 {
 	struct iovec vectors[ENCODE_IOV_MAX];
-	struct iovec *end;
 	int cnt;
 
 	cnt = entry->session->out->encode(vectors, ENCODE_IOV_MAX);
@@ -654,13 +688,21 @@ int Communicator::send_message(struct CommConnEntry *entry)
 		return -1;
 	}
 
-	end = vectors + cnt;
-	cnt = this->send_message_sync(vectors, cnt, entry);
-	if (cnt <= 0)
-		return cnt;
+	return this->send_message_loop(vectors, cnt, entry);
+}
 
+int Communicator::send_message_loop(struct iovec vectors[], int cnt,
+								struct CommConnEntry *entry)
+{
+	struct iovec *end = vectors + cnt;
+	cnt = this->send_message_sync(vectors, cnt, entry);
+	if (cnt < 0)
+		return cnt;
+	if (cnt == 0)
+		return this->send_message_done(entry);
 	return this->send_message_async(end - cnt, cnt, entry);
 }
+
 
 void Communicator::handle_incoming_request(struct poller_result *res)
 {
@@ -738,6 +780,7 @@ void Communicator::handle_incoming_request(struct poller_result *res)
 		case CONN_STATE_CLOSING:
 			if (entry->is_channel)
 				session = entry->session;
+
 			break;
 
 		case CONN_STATE_SUCCESS:
@@ -861,7 +904,7 @@ void Communicator::handle_read_result(struct poller_result *res)
 	if (res->state != PR_ST_MODIFIED)
 	{
 		if (entry->service)
-			this->handle_incoming_request(res);
+			this->stream_result(res);
 		else
 			this->handle_incoming_reply(res);
 	}
@@ -1038,10 +1081,10 @@ void Communicator::handle_request_result(struct poller_result *res)
 void Communicator::handle_write_result(struct poller_result *res)
 {
 	struct CommConnEntry *entry = (struct CommConnEntry *)res->data.context;
-
 	free(entry->write_iov);
+	entry->write_iov = NULL;
 	if (entry->service)
-		this->handle_reply_result(res);
+		this->stream_result(res);
 	else
 		this->handle_request_result(res);
 }
@@ -1071,6 +1114,8 @@ struct CommConnEntry *Communicator::accept_conn(CommServiceTarget *target,
 				entry->error = 0;
 				entry->ref = 1;
 				entry->is_channel = 0;
+				entry->stream_reply = NULL;
+				entry->write_iov = NULL;
 				if (service->is_channel())
 				{
 					entry->is_channel = 1;
@@ -1179,6 +1224,7 @@ void Communicator::handle_listen_result(struct poller_result *res)
 		if (entry)
 		{
 			entry->mpoller = this->mpoller;
+			entry->communicator = this;
 			if (service->ssl_ctx)
 			{
 				entry->ssl = poller_ssl_create(entry->sockfd, service->ssl_ctx);
@@ -1853,6 +1899,8 @@ struct CommConnEntry *Communicator::launch_conn(CommSession *session,
 					entry->error = 0;
 					entry->ref = 1;
 					entry->is_channel = 0;
+					entry->stream_reply = NULL;
+					entry->write_iov = NULL;
 					if (session->is_channel())
 					{
 						entry->is_channel = 1;
@@ -1937,6 +1985,7 @@ int Communicator::request_new_conn(CommSession *session, CommTarget *target)
 	if (entry)
 	{
 		entry->mpoller = this->mpoller;
+		entry->communicator = this;
 		session->conn = entry->conn;
 		session->seq = entry->seq++;
 		data.operation = PD_OP_CONNECT;
@@ -2150,7 +2199,7 @@ int Communicator::reply_unreliable(CommSession *session, CommTarget *target)
 
 int Communicator::reply(CommSession *session)
 {
-	struct CommConnEntry *entry;
+	CommConnEntry *entry;
 	CommServiceTarget *target;
 	int errno_bak;
 	int ret;
@@ -2160,20 +2209,19 @@ int Communicator::reply(CommSession *session)
 		errno = EINVAL;
 		return -1;
 	}
-
+	if (session->out && this->stream_reply_done(session))
+		return 0;
 	if (session->out)
 	{
 		errno = ENOENT;
 		return -1;
 	}
-
 	errno_bak = errno;
 	target = (CommServiceTarget *)session->target;
 	if (target->service->reliable)
 		ret = this->reply_reliable(session, target);
 	else
 		ret = this->reply_unreliable(session, target);
-
 	if (ret == 0)
 	{
 		entry = session->in->entry;
@@ -2186,7 +2234,6 @@ int Communicator::reply(CommSession *session)
 	}
 	else if (ret < 0)
 		return -1;
-
 	errno = errno_bak;
 	return 0;
 }
@@ -2575,3 +2622,5 @@ void Communicator::channel_shutdown(CommSession *session)
 	errno = errno_bak;
 }
 
+
+#include "StreamReply.inl"

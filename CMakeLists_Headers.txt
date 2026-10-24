@@ -56,6 +56,7 @@ set(INCLUDE_HEADERS
 	src/protocol/TLVMessage.h
 	src/protocol/ConsulDataTypes.h
 	src/server/WFServer.h
+	src/include/workflow/StreamReply.h
 	src/server/WFDnsServer.h
 	src/server/WFHttpServer.h
 	src/server/WFRedisServer.h

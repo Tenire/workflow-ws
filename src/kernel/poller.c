@@ -348,6 +348,11 @@ static void __poller_insert_node(struct __poller_node *node, poller_t *poller)
 	if (list_empty(&poller->timeo_list))
 	{
 		list_add(&node->list, &poller->timeo_list);
+		if (!poller->tree_first)
+		{
+			__poller_set_timerfd(poller->timerfd, &node->timeout, poller);
+			return;
+		}
 		end = rb_entry(poller->tree_first, struct __poller_node, rb);
 	}
 	else if (__timeout_cmp(node, end) >= 0)
