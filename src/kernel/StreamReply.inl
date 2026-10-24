@@ -6,6 +6,9 @@ void Communicator::stream_release(StreamReply::Impl *impl)
         return;
     CommConnEntry *entry = impl->entry;
     CommServiceTarget *target = (CommServiceTarget *)entry->target;
+    pthread_mutex_lock(&target->mutex);
+    entry->stream_reply = NULL;
+    pthread_mutex_unlock(&target->mutex);
     delete impl->handle;
     delete impl;
     if (__sync_sub_and_fetch(&entry->ref, 1) == 0)
@@ -251,6 +254,15 @@ void Communicator::stream_result(struct poller_result *res)
     CommConnEntry *entry = (CommConnEntry *)res->data.context;
     CommTarget *target = entry->target;
     pthread_mutex_lock(&target->mutex);
+    if (!entry->stream_reply)
+    {
+        pthread_mutex_unlock(&target->mutex);
+        if (res->data.operation == PD_OP_READ)
+            this->handle_incoming_request(res);
+        else
+            this->handle_reply_result(res);
+        return;
+    }
     StreamReply::Impl *impl = entry->stream_reply->impl;
     __sync_add_and_fetch(&impl->references, 1); /* callback may destroy task */
     impl->node_active = false;

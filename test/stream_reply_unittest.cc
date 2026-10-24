@@ -9,6 +9,7 @@
 #include <openssl/ssl.h>
 #include <openssl/x509.h>
 #include <arpa/inet.h>
+#include <netinet/in.h>
 #include <sys/socket.h>
 #include <sys/uio.h>
 #include <unistd.h>
@@ -816,3 +817,12 @@ TEST(stream_reply_unittest, tls_slow_client_send_timeout_completes_borrowed_batc
 }
 
 } // namespace
+
+#if OPENSSL_VERSION_NUMBER >= 0x10100000L
+int main(int argc, char *argv[])
+{
+	OPENSSL_init_ssl(0, 0);
+	::testing::InitGoogleTest(&argc, argv);
+	return RUN_ALL_TESTS();
+}
+#endif
