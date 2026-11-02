@@ -4,6 +4,9 @@ set_default(false)
 if not is_plat("macosx") then
     add_ldflags("-lrt")
 end
+add_linkdirs(get_config("workflow_lib"))
+add_links("workflow")
+
 
 function all_examples()
     local res = {}
@@ -11,7 +14,7 @@ function all_examples()
         local item = {}
         local s = path.filename(x)
         if ((s == "upstream_unittest.cc" and not has_config("upstream")) or
-           ((s == "tutorial-02-redis_cli.cc" or s == "tutorial-03-wget_to_redis.cc") and not has_config("redis")) or
+           ((s == "tutorial-02-redis_cli.cc" or s == "tutorial-03-wget_to_redis.cc" or s == "tutorial-18-redis_subscriber.cc") and not has_config("redis")) or
            (s == "tutorial-12-mysql_cli.cc" and not has_config("mysql")) or
            (s == "tutorial-14-consul_cli.cc" and not has_config("consul")) or
            (s == "tutorial-13-kafka_cli.cc")) then

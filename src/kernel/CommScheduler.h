@@ -187,6 +187,17 @@ public:
 		this->comm.io_unbind(service);
 	}
 
+	/* for channels. */
+	void channel_shutdown(CommSession *session)
+	{
+		this->comm.channel_shutdown(session);
+	}
+
+	int channel_send_one(CommSession *session)
+	{
+		return this->comm.channel_send_one(session);
+	}
+
 public:
 	int is_handler_thread() const
 	{
@@ -196,6 +207,17 @@ public:
 	int increase_handler_thread()
 	{
 		return this->comm.increase_handler_thread();
+	}
+
+	int decrease_handler_thread()
+	{
+		return this->comm.decrease_handler_thread();
+	}
+
+public:
+	void customize_event_handler(CommEventHandler *handler)
+	{
+		this->comm.customize_event_handler(handler);
 	}
 
 private:

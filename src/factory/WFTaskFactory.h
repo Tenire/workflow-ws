@@ -169,9 +169,6 @@ public:
 											off_t offset,
 											fio_callback_t callback);
 
-	/* preadv and pwritev tasks are supported by Linux aio only.
-	 * On macOS or others, you will get an ENOSYS error in callback. */
-
 	static WFFileVIOTask *create_preadv_task(int fd,
 											 const struct iovec *iov,
 											 int iovcnt,
@@ -187,32 +184,30 @@ public:
 	static WFFileSyncTask *create_fsync_task(int fd,
 											 fsync_callback_t callback);
 
-	/* On systems that do not support fdatasync(), like macOS,
-	 * fdsync task is equal to fsync task. */
-	static WFFileSyncTask *create_fdsync_task(int fd,
-											  fsync_callback_t callback);
+	static WFFileSyncTask *create_fdatasync_task(int fd,
+												 fsync_callback_t callback);
 
 	/* File tasks with path name. */
 public:
-	static WFFileIOTask *create_pread_task(const std::string& pathname,
+	static WFFileIOTask *create_pread_task(const std::string& path,
 										   void *buf,
 										   size_t count,
 										   off_t offset,
 										   fio_callback_t callback);
 
-	static WFFileIOTask *create_pwrite_task(const std::string& pathname,
+	static WFFileIOTask *create_pwrite_task(const std::string& path,
 											const void *buf,
 											size_t count,
 											off_t offset,
 											fio_callback_t callback);
 
-	static WFFileVIOTask *create_preadv_task(const std::string& pathname,
+	static WFFileVIOTask *create_preadv_task(const std::string& path,
 											 const struct iovec *iov,
 											 int iovcnt,
 											 off_t offset,
 											 fvio_callback_t callback);
 
-	static WFFileVIOTask *create_pwritev_task(const std::string& pathname,
+	static WFFileVIOTask *create_pwritev_task(const std::string& path,
 											  const struct iovec *iov,
 											  int iovcnt,
 											  off_t offset,
@@ -222,21 +217,24 @@ public:
 	static WFTimerTask *create_timer_task(time_t seconds, long nanoseconds,
 										  timer_callback_t callback);
 
-	/* create a named timer. */
+	/* Create a named timer. */
 	static WFTimerTask *create_timer_task(const std::string& timer_name,
 										  time_t seconds, long nanoseconds,
 										  timer_callback_t callback);
 
-	/* cancel all timers under the name. */
-	static void cancel_by_name(const std::string& timer_name)
+	/* Cancel all timers under the name. */
+	static int cancel_by_name(const std::string& timer_name)
 	{
-		WFTaskFactory::cancel_by_name(timer_name, (size_t)-1);
+		return WFTaskFactory::cancel_by_name(timer_name, (size_t)-1);
 	}
 
-	/* cancel at most 'max' timers under the name. */
-	static void cancel_by_name(const std::string& timer_name, size_t max);
+	/* Cancel at most 'max' timers under the name. */
+	static int cancel_by_name(const std::string& timer_name, size_t max);
 
-	/* timer in microseconds (deprecated) */
+	/* Timer to be canceled immediately after started. */
+	static WFTimerTask *create_timer_task(timer_callback_t callback);
+
+	/* Timer in microseconds. (deprecated) */
 	static WFTimerTask *create_timer_task(unsigned int microseconds,
 										  timer_callback_t callback);
 
@@ -256,17 +254,16 @@ public:
 
 	/* Count by a counter's name. When count_by_name(), it's safe to count
 	 * exceeding target_value. When multiple counters share a same name,
-	 * this operation will be performed on the first created. If no counter
-	 * matches the name, nothing is performed. */
-	static void count_by_name(const std::string& counter_name)
+	 * this operation will be performed on the first created. */
+	static int count_by_name(const std::string& counter_name)
 	{
-		WFTaskFactory::count_by_name(counter_name, 1);
+		return WFTaskFactory::count_by_name(counter_name, 1);
 	}
 
 	/* Count by name with a value n. When multiple counters share this name,
 	 * the operation is performed on the counters in the sequence of its
 	 * creation, and more than one counter may reach target value. */
-	static void count_by_name(const std::string& counter_name, unsigned int n);
+	static int count_by_name(const std::string& counter_name, unsigned int n);
 
 public:
 	static WFMailboxTask *create_mailbox_task(void **mailbox,
@@ -290,13 +287,17 @@ public:
 
 	/* The 'msg' will be sent to the all mailbox tasks under the name, and
 	 * would be lost if no task matched. */
-	static void send_by_name(const std::string& mailbox_name, void *msg)
+	static int send_by_name(const std::string& mailbox_name, void *msg)
 	{
-		WFTaskFactory::send_by_name(mailbox_name, msg, (size_t)-1);
+		return WFTaskFactory::send_by_name(mailbox_name, msg, (size_t)-1);
 	}
 
-	static void send_by_name(const std::string& mailbox_name, void *msg,
-							 size_t max);
+	static int send_by_name(const std::string& mailbox_name, void *msg,
+							size_t max);
+
+	template<typename T>
+	static int send_by_name(const std::string& mailbox_name, T *const msg[],
+							size_t max);
 
 public:
 	static WFSelectorTask *create_selector_task(size_t candidates,
@@ -322,13 +323,17 @@ public:
 	static WFConditional *create_conditional(const std::string& cond_name,
 											 SubTask *task);
 
-	static void signal_by_name(const std::string& cond_name, void *msg)
+	static int signal_by_name(const std::string& cond_name, void *msg)
 	{
-		WFTaskFactory::signal_by_name(cond_name, msg, (size_t)-1);
+		return WFTaskFactory::signal_by_name(cond_name, msg, (size_t)-1);
 	}
 
-	static void signal_by_name(const std::string& cond_name, void *msg,
-							   size_t max);
+	static int signal_by_name(const std::string& cond_name, void *msg,
+							  size_t max);
+
+	template<typename T>
+	static int signal_by_name(const std::string& cond_name, T *const msg[],
+							  size_t max);
 
 public:
 	static WFConditional *create_guard(const std::string& resource_name,
@@ -340,17 +345,7 @@ public:
 	/* The 'guard' is acquired after started, so call 'release_guard' after
 	   and only after the task is finished, typically in its callback.
 	   The function returns 1 if another is signaled, otherwise returns 0. */
-	static int release_guard(const std::string& resource_name)
-	{
-		return WFTaskFactory::release_guard(resource_name, NULL);
-	}
-
 	static int release_guard(const std::string& resource_name, void *msg);
-
-	static int release_guard_safe(const std::string& resource_name)
-	{
-		return WFTaskFactory::release_guard_safe(resource_name, NULL);
-	}
 
 	static int release_guard_safe(const std::string& resource_name, void *msg);
 

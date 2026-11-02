@@ -42,6 +42,7 @@ static int __mpoller_create(const struct poller_params *params,
 		if (i == mpoller->nthreads)
 		{
 			mpoller->nodes_buf = nodes_buf;
+			mpoller->acc = 0;
 			return 0;
 		}
 
@@ -78,7 +79,7 @@ mpoller_t *mpoller_create(const struct poller_params *params, size_t nthreads)
 
 int mpoller_start(mpoller_t *mpoller)
 {
-	size_t i;
+	unsigned int i;
 
 	for (i = 0; i < mpoller->nthreads; i++)
 	{
@@ -95,9 +96,18 @@ int mpoller_start(mpoller_t *mpoller)
 	return -1;
 }
 
+void mpoller_set_callback(void (*callback)(struct poller_result *, void *),
+						  mpoller_t *mpoller)
+{
+	unsigned int i;
+
+	for (i = 0; i < mpoller->nthreads; i++)
+		poller_set_callback(callback, mpoller->poller[i]);
+}
+
 void mpoller_stop(mpoller_t *mpoller)
 {
-	size_t i;
+	unsigned int i;
 
 	for (i = 0; i < mpoller->nthreads; i++)
 		poller_stop(mpoller->poller[i]);
@@ -105,7 +115,7 @@ void mpoller_stop(mpoller_t *mpoller)
 
 void mpoller_destroy(mpoller_t *mpoller)
 {
-	size_t i;
+	unsigned int i;
 
 	for (i = 0; i < mpoller->nthreads; i++)
 		__poller_destroy(mpoller->poller[i]);

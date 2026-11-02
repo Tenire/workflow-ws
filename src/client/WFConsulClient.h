@@ -23,6 +23,7 @@
 #include <vector>
 #include <utility>
 #include <functional>
+#include <openssl/ssl.h>
 #include "HttpMessage.h"
 #include "WFTaskFactory.h"
 #include "ConsulDataTypes.h"
@@ -43,10 +44,10 @@ class WFConsulTask : public WFGenericTask
 {
 public:
 	bool get_discover_result(
-			std::vector<struct protocol::ConsulServiceInstance>& result);
+			std::vector<struct protocol::ConsulServiceInstance>& result) const;
 
 	bool get_list_service_result(
-			std::vector<struct protocol::ConsulServiceTags>& result);
+			std::vector<struct protocol::ConsulServiceTags>& result) const;
 
 public:
 	void set_service(const struct protocol::ConsulService *service);
@@ -70,6 +71,7 @@ public:
 	{
 		this->consul_index = consul_index;
 	}
+
 	long long get_consul_index() const { return this->consul_index; }
 
 	const protocol::HttpResponse *get_http_resp() const
@@ -81,6 +83,11 @@ protected:
 	void set_config(protocol::ConsulConfig conf)
 	{
 		this->config = std::move(conf);
+	}
+
+	void set_ssl_ctx(SSL_CTX *ssl_ctx)
+	{
+		this->ssl_ctx = ssl_ctx;
 	}
 
 protected:
@@ -102,6 +109,7 @@ protected:
 
 protected:
 	protocol::ConsulConfig config;
+	SSL_CTX *ssl_ctx;
 	struct protocol::ConsulService service;
 	std::string proxy_url;
 	int retry_max;
@@ -125,8 +133,25 @@ class WFConsulClient
 {
 public:
 	// example: http://127.0.0.1:8500
-	int init(const std::string& proxy_url);
-	int init(const std::string& proxy_url, protocol::ConsulConfig config);
+	int init(const std::string& proxy_url)
+	{
+		return this->init(proxy_url, NULL);
+	}
+
+	int init(const std::string& proxy_url, protocol::ConsulConfig config)
+	{
+		return this->init(proxy_url, std::move(config), NULL);
+	}
+
+	// with specific SSL_CTX
+	int init(const std::string& proxy_url, SSL_CTX *ctx)
+	{
+		return this->init(proxy_url, protocol::ConsulConfig(), ctx);
+	}
+
+	int init(const std::string& proxy_url, protocol::ConsulConfig config,
+			 SSL_CTX *ctx);
+
 	void deinit() { }
 
 	WFConsulTask *create_discover_task(const std::string& service_namespace,
@@ -149,9 +174,10 @@ public:
 										 int retry_max,
 										 consul_callback_t cb);
 
-private:
+protected:
 	std::string proxy_url;
 	protocol::ConsulConfig config;
+	SSL_CTX *ssl_ctx;
 
 public:
 	virtual ~WFConsulClient() { }

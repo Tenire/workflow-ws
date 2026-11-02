@@ -16,11 +16,13 @@
   Authors: Wang Zhenpeng (wangzhenpeng@sogou-inc.com)
 */
 
+#include <stdio.h>
 #include <string.h>
 #include <string>
 #include <vector>
 #include <utility>
 #include <functional>
+#include <openssl/ssl.h>
 #include "json_parser.h"
 #include "StringUtil.h"
 #include "URIParser.h"
@@ -45,6 +47,7 @@ WFConsulTask::WFConsulTask(const std::string& proxy_url,
 	this->retry_max = retry_max;
 	this->finish = false;
 	this->consul_index = 0;
+	this->ssl_ctx = NULL;
 }
 
 void WFConsulTask::set_service(const struct protocol::ConsulService *service)
@@ -68,7 +71,7 @@ static bool parse_list_service_result(const json_value_t *root,
 							std::vector<struct ConsulServiceTags>& result);
 
 bool WFConsulTask::get_discover_result(
-	std::vector<struct ConsulServiceInstance>& result)
+	std::vector<struct ConsulServiceInstance>& result) const
 {
 	json_value_t *root;
 	int errno_bak;
@@ -96,7 +99,7 @@ bool WFConsulTask::get_discover_result(
 }
 
 bool WFConsulTask::get_list_service_result(
-	std::vector<struct ConsulServiceTags>& result)
+	std::vector<struct ConsulServiceTags>& result) const
 {
 	json_value_t *root;
 	int errno_bak;
@@ -168,6 +171,9 @@ void WFConsulTask::dispatch()
 		this->subtask_done();
 		return;
 	}
+
+	auto *t = (WFComplexClientTask<HttpRequest, HttpResponse> *)task;
+	t->set_ssl_ctx(this->ssl_ctx);
 
 	series_of(this)->push_front(this);
 	series_of(this)->push_front(task);
@@ -394,7 +400,8 @@ void WFConsulTask::register_callback(WFHttpTask *task)
 	t->finish = true;
 }
 
-int WFConsulClient::init(const std::string& proxy_url, ConsulConfig config)
+int WFConsulClient::init(const std::string& proxy_url, ConsulConfig config,
+						 SSL_CTX *ssl_ctx)
 {
 	ParsedURI uri;
 
@@ -410,17 +417,13 @@ int WFConsulClient::init(const std::string& proxy_url, ConsulConfig config)
 		}
 
 		this->config = std::move(config);
+		this->ssl_ctx = ssl_ctx;
 		return 0;
 	}
 	else if (uri.state == URI_STATE_INVALID)
 		errno = EINVAL;
 
 	return -1;
-}
-
-int WFConsulClient::init(const std::string& proxy_url)
-{
-	return this->init(proxy_url, ConsulConfig());
 }
 
 WFConsulTask *WFConsulClient::create_discover_task(
@@ -434,6 +437,7 @@ WFConsulTask *WFConsulClient::create_discover_task(
 										  std::move(cb));
 	task->set_api_type(CONSUL_API_TYPE_DISCOVER);
 	task->set_config(this->config);
+	task->set_ssl_ctx(this->ssl_ctx);
 	return task;
 }
 
@@ -447,6 +451,7 @@ WFConsulTask *WFConsulClient::create_list_service_task(
 										  std::move(cb));
 	task->set_api_type(CONSUL_API_TYPE_LIST_SERVICE);
 	task->set_config(this->config);
+	task->set_ssl_ctx(this->ssl_ctx);
 	return task;
 }
 
@@ -462,6 +467,7 @@ WFConsulTask *WFConsulClient::create_register_task(
 										  std::move(cb));
 	task->set_api_type(CONSUL_API_TYPE_REGISTER);
 	task->set_config(this->config);
+	task->set_ssl_ctx(this->ssl_ctx);
 	return task;
 }
 
@@ -476,6 +482,7 @@ WFConsulTask *WFConsulClient::create_deregister_task(
 										  std::move(cb));
 	task->set_api_type(CONSUL_API_TYPE_DEREGISTER);
 	task->set_config(this->config);
+	task->set_ssl_ctx(this->ssl_ctx);
 	return task;
 }
 
@@ -492,8 +499,6 @@ static bool create_tagged_address(const ConsulAddress& consul_address,
 		return false;
 
 	json_object_t *obj = json_value_object(val);
-	if (!obj)
-		return false;
 
 	if (!json_object_append(obj, "Address", JSON_VALUE_STRING,
 							consul_address.first.c_str()))
@@ -519,8 +524,6 @@ static bool create_health_check(const ConsulConfig& config, json_object_t *obj)
 		return false;
 
 	obj = json_value_object(val);
-	if (!obj)
-		return false;
 
 	str = config.get_check_name();
 	if (!json_object_append(obj, "Name", JSON_VALUE_STRING, str.c_str()))
@@ -549,8 +552,6 @@ static bool create_health_check(const ConsulConfig& config, json_object_t *obj)
 			return false;
 
 		json_object_t *header_obj = json_value_object(val);
-		if (!header_obj)
-			return false;
 
 		for (const auto& header : *config.get_http_headers())
 		{
@@ -560,8 +561,6 @@ static bool create_health_check(const ConsulConfig& config, json_object_t *obj)
 				return false;
 
 			json_array_t *arr = json_value_array(val);
-			if (!arr)
-				return false;
 
 			for (const auto& value : header.second)
 			{
@@ -637,8 +636,6 @@ static bool create_register_request(const json_value_t *root,
 		return false;
 
 	json_array_t *arr = json_value_array(val);
-	if (!arr)
-		return false;
 
 	for (const auto& tag : service->tags)
 	{
@@ -659,8 +656,6 @@ static bool create_register_request(const json_value_t *root,
 		return false;
 
 	json_object_t *meta_obj = json_value_object(val);
-	if (!meta_obj)
-		return false;
 
 	for (const auto& meta_kv : service->meta)
 	{
@@ -819,11 +814,11 @@ static bool parse_discover_node(const json_object_t *obj,
 	}
 
 	val = json_object_find("CreateIndex", obj);
-	if (val)
+	if (val && json_value_type(val) == JSON_VALUE_NUMBER)
 		instance->create_index = json_value_number(val);
 
 	val = json_object_find("ModifyIndex", obj);
-	if (val)
+	if (val && json_value_type(val) == JSON_VALUE_NUMBER)
 		instance->modify_index = json_value_number(val);
 
 	return true;
@@ -859,7 +854,7 @@ static bool parse_tagged_address(const char *name,
 
 	tagged_address.first = str;
 	val = json_object_find("Port", obj);
-	if (!val)
+	if (!val || json_value_type(val) != JSON_VALUE_NUMBER)
 		return false;
 
 	tagged_address.second = json_value_number(val);
@@ -1116,6 +1111,60 @@ static bool parse_discover_result(const json_value_t *root,
 	return true;
 }
 
+static void print_json_string(const char *str, std::string& json_str)
+{
+	json_str += "\"";
+	while (*str)
+	{
+		switch (*str)
+		{
+		case '\r':
+			json_str += "\\r";
+			break;
+		case '\n':
+			json_str += "\\n";
+			break;
+		case '\f':
+			json_str += "\\f";
+			break;
+		case '\b':
+			json_str += "\\b";
+			break;
+		case '\"':
+			json_str += "\\\"";
+			break;
+		case '\t':
+			json_str += "\\t";
+			break;
+		case '\\':
+			json_str += "\\\\";
+			break;
+		default:
+			if ((unsigned char)*str < 0x20)
+			{
+				char buf[8];
+				sprintf(buf, "\\u00%02x", *str);
+				json_str += buf;
+			}
+			else
+				json_str += *str;
+			break;
+		}
+		str++;
+	}
+	json_str += "\"";
+}
+
+static void print_json_number(double number, std::string& json_str)
+{
+	long long integer = number;
+
+	if (integer == number)
+		json_str += std::to_string(integer);
+	else
+		json_str += std::to_string(number);
+}
+
 static void print_json_object(const json_object_t *obj, int depth,
 							  std::string& json_str)
 {
@@ -1134,9 +1183,8 @@ static void print_json_object(const json_object_t *obj, int depth,
 		for (i = 0; i < depth + 1; i++)
 			json_str += "    ";
 
-		json_str += "\"";
-		json_str += name;
-		json_str += "\": ";
+		print_json_string(name, json_str);
+		json_str += ": ";
 		print_json_value(val, depth + 1, json_str);
 	}
 
@@ -1172,53 +1220,6 @@ static void print_json_array(const json_array_t *arr, int depth,
 		json_str += "    ";
 
 	json_str += "]";
-}
-
-static void print_json_string(const char *str, std::string& json_str)
-{
-	json_str += "\"";
-	while (*str)
-	{
-		switch (*str)
-		{
-		case '\r':
-			json_str += "\\r";
-			break;
-		case '\n':
-			json_str += "\\n";
-			break;
-		case '\f':
-			json_str += "\\f";
-			break;
-		case '\b':
-			json_str += "\\b";
-			break;
-		case '\"':
-			json_str += "\\\"";
-			break;
-		case '\t':
-			json_str += "\\t";
-			break;
-		case '\\':
-			json_str += "\\\\";
-			break;
-		default:
-			json_str += *str;
-			break;
-		}
-		str++;
-	}
-	json_str += "\"";
-}
-
-static void print_json_number(double number, std::string& json_str)
-{
-	long long integer = number;
-
-	if (integer == number)
-		json_str += std::to_string(integer);
-	else
-		json_str += std::to_string(number);
 }
 
 static void print_json_value(const json_value_t *val, int depth,

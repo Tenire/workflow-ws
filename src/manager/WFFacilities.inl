@@ -131,7 +131,7 @@ inline WFFuture<int> WFFacilities::async_fdatasync(int fd)
 {
 	auto *pr = new WFPromise<int>();
 	auto fr = pr->get_future();
-	auto *task = WFTaskFactory::create_fdsync_task(fd, __fsync_future_callback);
+	auto *task = WFTaskFactory::create_fdatasync_task(fd, __fsync_future_callback);
 
 	task->user_data = pr;
 	task->start();
@@ -192,14 +192,6 @@ inline WFFacilities::WaitGroup::~WaitGroup()
 		this->task->count();
 }
 
-inline void WFFacilities::WaitGroup::done()
-{
-	if (--this->nleft == 0)
-	{
-		this->task->count();
-	}
-}
-
 inline void WFFacilities::WaitGroup::wait() const
 {
 	if (this->nleft < 0)
@@ -220,6 +212,19 @@ inline std::future_status WFFacilities::WaitGroup::wait(int timeout) const
 	}
 
 	return this->future.wait_for(std::chrono::milliseconds(timeout));
+}
+
+inline void WFFacilities::WaitGroup::add(int n)
+{
+	if ((this->nleft += n) == 0)
+	{
+		this->task->count();
+	}
+}
+
+inline void WFFacilities::WaitGroup::done()
+{
+	this->add(-1);
 }
 
 inline void WFFacilities::WaitGroup::__wait_group_callback(WFCounterTask *task)

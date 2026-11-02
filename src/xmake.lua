@@ -10,9 +10,9 @@ after_build(function (target)
         shared_suffix = "*.dylib"
     end
     if target:is_static() then
-        os.mv(path.join("$(projectdir)", target:targetdir(), "*.a"), lib_dir)
+        os.cp(path.join("$(projectdir)", target:targetdir(), "*.a"), lib_dir)
     else
-        os.mv(path.join("$(projectdir)", target:targetdir(), shared_suffix), lib_dir)
+        os.cp(path.join("$(projectdir)", target:targetdir(), shared_suffix), lib_dir)
     end
 end)
 
@@ -29,6 +29,17 @@ target("workflow")
 
         os.cp(path.join("$(projectdir)", "src/include/**.h"), include_path)
         os.cp(path.join("$(projectdir)", "src/include/**.inl"), include_path)
+        os.cp(path.join("$(projectdir)", "src/factory/WFChannel*.h"), include_path)
+        os.cp(path.join("$(projectdir)", "src/factory/WFChannel*.inl"), include_path)
+        os.cp(path.join("$(projectdir)", "src/factory/WebSocketChannelImpl.h"), include_path)
+        os.cp(path.join("$(projectdir)", "src/protocol/WebSocketMessage.h"), include_path)
+        os.cp(path.join("$(projectdir)", "src/protocol/websocket_parser.h"), include_path)
+        os.cp(path.join("$(projectdir)", "src/protocol/StreamMessage.h"), include_path)
+        os.cp(path.join("$(projectdir)", "src/protocol/stream_parser.h"), include_path)
+        os.cp(path.join("$(projectdir)", "src/server/WFWebSocketServer.h"), include_path)
+        os.cp(path.join("$(projectdir)", "src/server/WFStreamServer.h"), include_path)
+        os.cp(path.join("$(projectdir)", "src/client/WFWebSocketClient.h"), include_path)
+        os.cp(path.join("$(projectdir)", "src/client/WFStreamClient.h"), include_path)
     end)
 
     after_clean(function (target)

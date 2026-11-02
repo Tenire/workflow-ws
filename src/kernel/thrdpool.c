@@ -17,8 +17,8 @@
 */
 
 #include <errno.h>
-#include <pthread.h>
 #include <stdlib.h>
+#include <pthread.h>
 #include "msgqueue.h"
 #include "thrdpool.h"
 
@@ -41,13 +41,31 @@ struct __thrdpool_task_entry
 
 static pthread_t __zero_tid;
 
+static void __thrdpool_exit_routine(void *context)
+{
+	thrdpool_t *pool = (thrdpool_t *)context;
+	pthread_t tid;
+
+	/* One thread joins another. Don't need to keep all thread IDs. */
+	pthread_mutex_lock(&pool->mutex);
+	tid = pool->tid;
+	pool->tid = pthread_self();
+	if (--pool->nthreads == 0 && pool->terminate)
+		pthread_cond_signal(pool->terminate);
+
+	pthread_mutex_unlock(&pool->mutex);
+	if (!pthread_equal(tid, __zero_tid))
+		pthread_join(tid, NULL);
+
+	pthread_exit(NULL);
+}
+
 static void *__thrdpool_routine(void *arg)
 {
 	thrdpool_t *pool = (thrdpool_t *)arg;
 	struct __thrdpool_task_entry *entry;
 	void (*task_routine)(void *);
 	void *task_context;
-	pthread_t tid;
 
 	pthread_setspecific(pool->key, pool);
 	while (!pool->terminate)
@@ -69,17 +87,7 @@ static void *__thrdpool_routine(void *arg)
 		}
 	}
 
-	/* One thread joins another. Don't need to keep all thread IDs. */
-	pthread_mutex_lock(&pool->mutex);
-	tid = pool->tid;
-	pool->tid = pthread_self();
-	if (--pool->nthreads == 0)
-		pthread_cond_signal(pool->terminate);
-
-	pthread_mutex_unlock(&pool->mutex);
-	if (!pthread_equal(tid, __zero_tid))
-		pthread_join(tid, NULL);
-
+	__thrdpool_exit_routine(pool);
 	return NULL;
 }
 
@@ -104,6 +112,8 @@ static void __thrdpool_terminate(int in_pool, thrdpool_t *pool)
 	pthread_mutex_unlock(&pool->mutex);
 	if (!pthread_equal(pool->tid, __zero_tid))
 		pthread_join(pool->tid, NULL);
+
+	pthread_cond_destroy(&term);
 }
 
 static int __thrdpool_create_threads(size_t nthreads, thrdpool_t *pool)
@@ -116,19 +126,25 @@ static int __thrdpool_create_threads(size_t nthreads, thrdpool_t *pool)
 	if (ret == 0)
 	{
 		if (pool->stacksize)
-			pthread_attr_setstacksize(&attr, pool->stacksize);
+			ret = pthread_attr_setstacksize(&attr, pool->stacksize);
 
-		while (pool->nthreads < nthreads)
+		if (ret == 0)
 		{
-			ret = pthread_create(&tid, &attr, __thrdpool_routine, pool);
-			if (ret == 0)
-				pool->nthreads++;
-			else
-				break;
+			pthread_mutex_lock(&pool->mutex);
+			while (pool->nthreads < nthreads)
+			{
+				ret = pthread_create(&tid, &attr, __thrdpool_routine, pool);
+				if (ret == 0)
+					pool->nthreads++;
+				else
+					break;
+			}
+
+			pthread_mutex_unlock(&pool->mutex);
 		}
 
 		pthread_attr_destroy(&attr);
-		if (pool->nthreads == nthreads)
+		if (ret == 0)
 			return 0;
 
 		__thrdpool_terminate(0, pool);
@@ -177,9 +193,6 @@ thrdpool_t *thrdpool_create(size_t nthreads, size_t stacksize)
 	return NULL;
 }
 
-inline void __thrdpool_schedule(const struct thrdpool_task *task, void *buf,
-								thrdpool_t *pool);
-
 void __thrdpool_schedule(const struct thrdpool_task *task, void *buf,
 						 thrdpool_t *pool)
 {
@@ -200,6 +213,11 @@ int thrdpool_schedule(const struct thrdpool_task *task, thrdpool_t *pool)
 	return -1;
 }
 
+int thrdpool_in_pool(thrdpool_t *pool)
+{
+	return pthread_getspecific(pool->key) == pool;
+}
+
 int thrdpool_increase(thrdpool_t *pool)
 {
 	pthread_attr_t attr;
@@ -210,14 +228,18 @@ int thrdpool_increase(thrdpool_t *pool)
 	if (ret == 0)
 	{
 		if (pool->stacksize)
-			pthread_attr_setstacksize(&attr, pool->stacksize);
+			ret = pthread_attr_setstacksize(&attr, pool->stacksize);
 
-		pthread_mutex_lock(&pool->mutex);
-		ret = pthread_create(&tid, &attr, __thrdpool_routine, pool);
 		if (ret == 0)
-			pool->nthreads++;
+		{
+			pthread_mutex_lock(&pool->mutex);
+			ret = pthread_create(&tid, &attr, __thrdpool_routine, pool);
+			if (ret == 0)
+				pool->nthreads++;
 
-		pthread_mutex_unlock(&pool->mutex);
+			pthread_mutex_unlock(&pool->mutex);
+		}
+
 		pthread_attr_destroy(&attr);
 		if (ret == 0)
 			return 0;
@@ -227,11 +249,27 @@ int thrdpool_increase(thrdpool_t *pool)
 	return -1;
 }
 
-inline int thrdpool_in_pool(thrdpool_t *pool);
-
-int thrdpool_in_pool(thrdpool_t *pool)
+int thrdpool_decrease(thrdpool_t *pool)
 {
-	return pthread_getspecific(pool->key) == pool;
+	void *buf = malloc(sizeof (struct __thrdpool_task_entry));
+	struct __thrdpool_task_entry *entry;
+
+	if (buf)
+	{
+		entry = (struct __thrdpool_task_entry *)buf;
+		entry->task.routine = __thrdpool_exit_routine;
+		entry->task.context = pool;
+		msgqueue_put_head(entry, pool->msgqueue);
+		return 0;
+	}
+
+	return -1;
+}
+
+void thrdpool_exit(thrdpool_t *pool)
+{
+	if (thrdpool_in_pool(pool))
+		__thrdpool_exit_routine(pool);
 }
 
 void thrdpool_destroy(void (*pending)(const struct thrdpool_task *),
@@ -247,7 +285,7 @@ void thrdpool_destroy(void (*pending)(const struct thrdpool_task *),
 		if (!entry)
 			break;
 
-		if (pending)
+		if (pending && entry->task.routine != __thrdpool_exit_routine)
 			pending(&entry->task);
 
 		free(entry);

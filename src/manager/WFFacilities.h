@@ -66,9 +66,10 @@ public:
 		WaitGroup(int n);
 		~WaitGroup();
 
-		void done();
 		void wait() const;
 		std::future_status wait(int timeout) const;
+		void add(int n);
+		void done();
 
 	private:
 		static void __wait_group_callback(WFCounterTask *task);
@@ -76,28 +77,6 @@ public:
 		std::atomic<int> nleft;
 		WFCounterTask *task;
 		WFFuture<void> future;
-	};
-
-public:
-	class ReplyGuard
-	{
-	public:
-		ReplyGuard(SubTask *server_task)
-		{
-			SeriesWork *series = series_of(server_task);
-			assert(series);
-			assert(server_task == series->get_last_task());
-			this->cond = WFTaskFactory::create_conditional(server_task);
-			series->set_last_task(this->cond);
-		}
-
-		~ReplyGuard()
-		{
-			this->cond->signal(NULL);
-		}
-
-	private:
-		WFConditional *cond;
 	};
 
 private:

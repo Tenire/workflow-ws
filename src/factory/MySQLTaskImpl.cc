@@ -45,6 +45,7 @@ protected:
 	virtual CommMessageOut *message_out();
 	virtual CommMessageIn *message_in();
 	virtual int keep_alive_timeout();
+	virtual int first_timeout();
 	virtual bool init_success();
 	virtual bool finish_once();
 
@@ -100,8 +101,8 @@ private:
 		MySSLWrapper(ProtocolMessage *msg, SSL *ssl) :
 			SSLWrapper(msg, ssl)
 		{ }
-		ProtocolMessage *get_msg() const { return this->msg; }
-		virtual ~MySSLWrapper() { delete this->msg; }
+		ProtocolMessage *get_msg() const { return this->message; }
+		virtual ~MySSLWrapper() { delete this->message; }
 	};
 
 private:
@@ -212,9 +213,6 @@ CommMessageOut *ComplexMySQLTask::message_out()
 		auth_switch_req->set_password(password_);
 		auth_switch_req->set_auth_plugin_name(std::move(conn->str));
 		auth_switch_req->set_seed(conn->seed);
-#if OPENSSL_VERSION_NUMBER < 0x10100000L
-		WFGlobal::get_ssl_client_ctx();
-#endif
 		break;
 
 	case ST_SHA256_PUBLIC_KEY_REQUEST:
@@ -521,6 +519,11 @@ int ComplexMySQLTask::keep_alive_timeout()
 
 	conn->mysql_seqid = resp->get_seqid() + 1;
 	return MYSQL_KEEPALIVE_DEFAULT;
+}
+
+int ComplexMySQLTask::first_timeout()
+{
+	return is_user_request_ ? this->watch_timeo : 0;
 }
 
 /*

@@ -25,17 +25,6 @@
 namespace protocol
 {
 
-#if OPENSSL_VERSION_NUMBER < 0x10100000L
-static inline BIO *__get_wbio(SSL *ssl)
-{
-	BIO *wbio = SSL_get_wbio(ssl);
-	BIO *next = BIO_next(wbio);
-	return next ? next : wbio;
-}
-
-# define SSL_get_wbio(ssl)	__get_wbio(ssl)
-#endif
-
 int SSLHandshaker::encode(struct iovec vectors[], int max)
 {
 	BIO *wbio = SSL_get_wbio(this->ssl);
@@ -203,16 +192,13 @@ int SSLWrapper::append_message()
 		} while (nleft > 0);
 	}
 
-	if (ret < 0)
+	ret = SSL_get_error(this->ssl, ret);
+	if (ret != SSL_ERROR_WANT_READ)
 	{
-		ret = SSL_get_error(this->ssl, ret);
-		if (ret != SSL_ERROR_WANT_READ)
-		{
-			if (ret != SSL_ERROR_SYSCALL)
-				errno = -ret;
+		if (ret != SSL_ERROR_SYSCALL)
+			errno = -ret;
 
-			return -1;
-		}
+		return -1;
 	}
 
 	return 0;

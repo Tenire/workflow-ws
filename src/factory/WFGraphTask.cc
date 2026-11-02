@@ -39,6 +39,12 @@ WFGraphNode::~WFGraphNode()
 {
 	if (this->user_data)
 	{
+		if (series_of(this)->is_canceled())
+		{
+			for (WFGraphNode *node : this->successors)
+				series_of(node)->SeriesWork::cancel();
+		}
+
 		for (WFGraphNode *node : this->successors)
 			node->WFCounterTask::count();
 	}
@@ -87,18 +93,11 @@ SubTask *WFGraphTask::done()
 
 WFGraphTask::~WFGraphTask()
 {
-	SeriesWork *series;
-	size_t i;
-
 	if (this->parallel)
 	{
-		for (i = 0; i < this->parallel->size(); i++)
-		{
-			series = this->parallel->series_at(i);
+		for (SeriesWork *series : *this->parallel)
 			series->unset_last_task();
-		}
 
 		this->parallel->dismiss();
 	}
 }
-

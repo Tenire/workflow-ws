@@ -24,7 +24,6 @@
 #include <time.h>
 #include <netdb.h>
 #include <stdio.h>
-#include <new>
 #include <string>
 #include <functional>
 #include <utility>
@@ -38,7 +37,6 @@
 #include "WFTaskError.h"
 #include "EndpointParams.h"
 #include "WFNameService.h"
-#include "WFHttpServerTask.h"
 
 class __WFDynamicTask : public WFDynamicTask
 {
@@ -63,6 +61,26 @@ inline WFDynamicTask *
 WFTaskFactory::create_dynamic_task(dynamic_create_t create)
 {
 	return new __WFDynamicTask(std::move(create));
+}
+
+template<>
+int WFTaskFactory::send_by_name(const std::string&, void *const *, size_t);
+
+template<typename T>
+int WFTaskFactory::send_by_name(const std::string& mailbox_name, T *const msg[],
+								size_t max)
+{
+	return WFTaskFactory::send_by_name(mailbox_name, (void *const *)msg, max);
+}
+
+template<>
+int WFTaskFactory::signal_by_name(const std::string&, void *const *, size_t);
+
+template<typename T>
+int WFTaskFactory::signal_by_name(const std::string& cond_name, T *const msg[],
+								  size_t max)
+{
+	return WFTaskFactory::signal_by_name(cond_name, (void *const *)msg, max);
 }
 
 template<class REQ, class RESP, typename CTX = bool>
@@ -161,11 +179,10 @@ protected:
 
 	void clear_resp()
 	{
-		size_t size = this->resp.get_size_limit();
-
+		protocol::ProtocolMessage head(std::move(this->resp));
 		this->resp.~RESP();
-		new(&this->resp) RESP();
-		this->resp.set_size_limit(size);
+		new(&this->resp) RESP;
+		*(protocol::ProtocolMessage *)&this->resp = std::move(head);
 	}
 
 	void disable_retry()
@@ -198,6 +215,7 @@ private:
 	bool set_port();
 	void router_callback(void *t);
 	void switch_callback(void *t);
+	virtual void delete_this(void *t) { delete this; } /* for channel only */
 };
 
 template<class REQ, class RESP, typename CTX>
@@ -417,7 +435,7 @@ void WFComplexClientTask<REQ, RESP, CTX>::switch_callback(void *t)
 		series_of(this)->push_front(this);
 	}
 	else
-		delete this;
+		this->delete_this(nullptr);
 }
 
 template<class REQ, class RESP, typename CTX>
@@ -474,9 +492,7 @@ SubTask *WFComplexClientTask<REQ, RESP, CTX>::done()
 		auto&& cb = std::bind(&WFComplexClientTask::switch_callback,
 							  this,
 							  std::placeholders::_1);
-		WFTimerTask *timer;
-
-		timer = WFTaskFactory::create_timer_task(0, 0, std::move(cb));
+		WFTimerTask *timer = WFTaskFactory::create_timer_task(std::move(cb));
 		series->push_front(timer);
 	}
 	else
@@ -579,9 +595,9 @@ WFNetworkTaskFactory<REQ, RESP>::create_client_task(enum TransportType type,
 template<class REQ, class RESP>
 WFNetworkTask<REQ, RESP> *
 WFNetworkTaskFactory<REQ, RESP>::create_server_task(CommService *service,
-				std::function<void (WFNetworkTask<REQ, RESP> *)>& proc)
+				std::function<void (WFNetworkTask<REQ, RESP> *)>& process)
 {
-	return new WFServerTask<REQ, RESP>(service, WFGlobal::get_scheduler(), proc);
+	return new WFServerTask<REQ, RESP>(service, WFGlobal::get_scheduler(), process);
 }
 
 /**********Server Factory**********/
@@ -590,16 +606,13 @@ class WFServerTaskFactory
 {
 public:
 	static WFDnsTask *create_dns_task(CommService *service,
-					std::function<void (WFDnsTask *)>& proc);
+					std::function<void (WFDnsTask *)>& process);
 
 	static WFHttpTask *create_http_task(CommService *service,
-					std::function<void (WFHttpTask *)>& proc)
-	{
-		return new WFHttpServerTask(service, proc);
-	}
+					std::function<void (WFHttpTask *)>& process);
 
 	static WFMySQLTask *create_mysql_task(CommService *service,
-					std::function<void (WFMySQLTask *)>& proc);
+					std::function<void (WFMySQLTask *)>& process);
 };
 
 /************Go Task Factory************/
@@ -716,7 +729,7 @@ void WFTaskFactory::reset_go_task(WFGoTask *task, FUNC&& func, ARGS&&... args)
 
 template<> inline
 WFGoTask *WFTaskFactory::create_go_task(const std::string& queue_name,
-										std::nullptr_t&& func)
+										std::nullptr_t&&)
 {
 	return new __WFGoTask(WFGlobal::get_exec_queue(queue_name),
 						  WFGlobal::get_compute_executor(),
@@ -726,7 +739,7 @@ WFGoTask *WFTaskFactory::create_go_task(const std::string& queue_name,
 template<> inline
 WFGoTask *WFTaskFactory::create_timedgo_task(time_t seconds, long nanoseconds,
 											 const std::string& queue_name,
-											 std::nullptr_t&& func)
+											 std::nullptr_t&&)
 {
 	return new __WFTimedGoTask(seconds, nanoseconds,
 							   WFGlobal::get_exec_queue(queue_name),
@@ -736,7 +749,7 @@ WFGoTask *WFTaskFactory::create_timedgo_task(time_t seconds, long nanoseconds,
 
 template<> inline
 WFGoTask *WFTaskFactory::create_go_task(ExecQueue *queue, Executor *executor,
-										std::nullptr_t&& func)
+										std::nullptr_t&&)
 {
 	return new __WFGoTask(queue, executor, nullptr);
 }
@@ -744,13 +757,13 @@ WFGoTask *WFTaskFactory::create_go_task(ExecQueue *queue, Executor *executor,
 template<> inline
 WFGoTask *WFTaskFactory::create_timedgo_task(time_t seconds, long nanoseconds,
 											 ExecQueue *queue, Executor *executor,
-											 std::nullptr_t&& func)
+											 std::nullptr_t&&)
 {
 	return new __WFTimedGoTask(seconds, nanoseconds, queue, executor, nullptr);
 }
 
 template<> inline
-void WFTaskFactory::reset_go_task(WFGoTask *task, std::nullptr_t&& func)
+void WFTaskFactory::reset_go_task(WFGoTask *task, std::nullptr_t&&)
 {
 	((__WFGoTask *)task)->set_go_func(nullptr);
 }

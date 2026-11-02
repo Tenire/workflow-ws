@@ -59,6 +59,13 @@ protected:
 	}
 
 public:
+	virtual int append_fill(const void *buf, size_t size)
+	{
+		errno = ENOSYS;
+		return -1;
+	}
+
+public:
 	void set_size_limit(size_t limit) { this->size_limit = limit; }
 	size_t get_size_limit() const { return this->size_limit; }
 
@@ -70,7 +77,8 @@ public:
 	};
 
 	void set_attachment(Attachment *att) { this->attachment = att; }
-	Attachment *get_attachment() const { return this->attachment; }
+	Attachment *get_attachment() { return this->attachment; }
+	const Attachment *get_attachment() const { return this->attachment; }
 
 protected:
 	virtual int feedback(const void *buf, size_t size)
@@ -88,6 +96,8 @@ protected:
 		else
 			return this->CommMessageIn::renew();
 	}
+
+	virtual ProtocolMessage *inner() { return this; }
 
 protected:
 	size_t size_limit;
@@ -107,23 +117,22 @@ public:
 	virtual ~ProtocolMessage() { delete this->attachment; }
 
 public:
-	ProtocolMessage(ProtocolMessage&& msg)
+	ProtocolMessage(ProtocolMessage&& message)
 	{
-		this->size_limit = msg.size_limit;
-		msg.size_limit = (size_t)-1;
-		this->attachment = msg.attachment;
-		msg.attachment = NULL;
+		this->size_limit = message.size_limit;
+		this->attachment = message.attachment;
+		message.attachment = NULL;
+		this->wrapper = NULL;
 	}
 
-	ProtocolMessage& operator = (ProtocolMessage&& msg)
+	ProtocolMessage& operator = (ProtocolMessage&& message)
 	{
-		if (&msg != this)
+		if (&message != this)
 		{
-			this->size_limit = msg.size_limit;
-			msg.size_limit = (size_t)-1;
+			this->size_limit = message.size_limit;
 			delete this->attachment;
-			this->attachment = msg.attachment;
-			msg.attachment = NULL;
+			this->attachment = message.attachment;
+			message.attachment = NULL;
 		}
 
 		return *this;
@@ -137,31 +146,43 @@ class ProtocolWrapper : public ProtocolMessage
 protected:
 	virtual int encode(struct iovec vectors[], int max)
 	{
-		return this->msg->encode(vectors, max);
+		return this->message->encode(vectors, max);
 	}
 
 	virtual int append(const void *buf, size_t *size)
 	{
-		return this->msg->append(buf, size);
+		return this->message->append(buf, size);
 	}
 
 protected:
-	ProtocolMessage *msg;
+	virtual ProtocolMessage *inner()
+	{
+		return this->message->inner();
+	}
+
+protected:
+	void set_message(ProtocolMessage *message)
+	{
+		this->message = message;
+		if (message)
+			message->wrapper = this;
+	}
+
+protected:
+	ProtocolMessage *message;
 
 public:
-	ProtocolWrapper(ProtocolMessage *msg)
+	ProtocolWrapper(ProtocolMessage *message)
 	{
-		msg->wrapper = this;
-		this->msg = msg;
+		this->set_message(message);
 	}
 
 public:
 	ProtocolWrapper(ProtocolWrapper&& wrapper) :
 		ProtocolMessage(std::move(wrapper))
 	{
-		wrapper.msg->wrapper = this;
-		this->msg = wrapper.msg;
-		wrapper.msg = NULL;
+		this->set_message(wrapper.message);
+		wrapper.message = NULL;
 	}
 
 	ProtocolWrapper& operator = (ProtocolWrapper&& wrapper)
@@ -169,9 +190,8 @@ public:
 		if (&wrapper != this)
 		{
 			*(ProtocolMessage *)this = std::move(wrapper);
-			wrapper.msg->wrapper = this;
-			this->msg = wrapper.msg;
-			wrapper.msg = NULL;
+			this->set_message(wrapper.message);
+			wrapper.message = NULL;
 		}
 
 		return *this;

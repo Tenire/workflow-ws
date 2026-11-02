@@ -377,13 +377,11 @@ static int compress_buf(KafkaBlock *block, int compress_type, void *env)
 		}
 
 		*block = std::move(nblock);
-
 		break;
 
 	case Kafka_Snappy:
 		snappy_buffer = static_cast<KafkaBuffer *>(env);
 		snappy_buffer->append((const char *)block->get_block(), block->get_len());
-
 		break;
 
 	case Kafka_Lz4:
@@ -450,7 +448,7 @@ static int gzip_decompress(void *compressed, size_t n, KafkaBlock *block)
 	for (int pass = 1; pass <= 2; pass++)
 	{
 		z_stream strm = {0};
-		gz_header hdr;
+		gz_header hdr = {};
 		char buf[512];
 		char *p;
 		int len;
@@ -614,7 +612,7 @@ static int snappy_decompress(void *buf, size_t n, KafkaBlock *block)
 	};
 	static const size_t snappy_java_hdrlen = 8 + 4 + 4;
 
-	if (!memcmp(buf, snappy_java_magic, 8))
+	if (inlen >= snappy_java_hdrlen && !memcmp(buf, snappy_java_magic, 8))
 	{
 		inbuf = inbuf + snappy_java_hdrlen;
 		inlen -= snappy_java_hdrlen;
@@ -1415,7 +1413,7 @@ int KafkaMessage::parse_record_batch(void **buf, size_t *size,
 			return -1;
 		}
 
-		if ((int)crc32c(0, (const void *)*buf, hdr.length - 9) != hdr.crc)
+		if ((int)crc32c(*buf, hdr.length - 9) != hdr.crc)
 		{
 			errno = EBADMSG;
 			return -1;
@@ -1446,18 +1444,26 @@ int KafkaMessage::parse_record_batch(void **buf, size_t *size,
 	if (parse_i32(buf, size, &hdr.record_count) < 0)
 		return -1;
 
-	if (*size < (size_t)(hdr.length - 61 + 12))
+	if (hdr.length < 49)
+	{
+		errno = EBADMSG;
+		return -1;
+	}
+
+	size_t record_body_size = (size_t)(hdr.length - 49);
+	if (*size < record_body_size)
 		return 1;
 
 	KafkaBlock block;
+	int compress_type = hdr.attributes & 7;
 
-	if (hdr.attributes & 7)
+	if (compress_type != 0)
 	{
-		if (uncompress_buf(*buf, hdr.length - 61 + 12, &block, hdr.attributes & 7) < 0)
+		if (uncompress_buf(*buf, record_body_size, &block, compress_type) < 0)
 			return -1;
 
-		*buf = (char *)*buf + hdr.length - 61 + 12;
-		*size -= hdr.length - 61 + 12;
+		*buf = (char *)*buf + record_body_size;
+		*size -= record_body_size;
 	}
 
 	void *p = *buf;
@@ -1492,7 +1498,7 @@ int KafkaMessage::parse_record_batch(void **buf, size_t *size,
 		}
 	}
 
-	if (hdr.attributes == 0)
+	if (compress_type == 0)
 	{
 		*buf = p;
 		*size = n;
@@ -1554,7 +1560,7 @@ int KafkaMessage::parse_records(void **buf, size_t *size, bool check_crcs,
 			return 0;
 		}
 		else if (ret < 0)
-			break;
+			return ret;
 	}
 
 	*size -= msg_set_size;
@@ -1564,14 +1570,6 @@ int KafkaMessage::parse_records(void **buf, size_t *size, bool check_crcs,
 
 KafkaMessage::KafkaMessage()
 {
-	static struct Crc32cInitializer
-	{
-		Crc32cInitializer()
-		{
-			crc32c_global_init();
-		}
-	} initializer;
-
 	this->parser = new kafka_parser_t;
 	kafka_parser_init(this->parser);
 	this->stream = new EncodeStream;
@@ -2082,6 +2080,7 @@ int KafkaRequest::encode_produce(struct iovec vectors[], int max)
 	int topic_cnt = 0;
 	this->toppar_list.rewind();
 	KafkaToppar *toppar;
+	KafkaBlock *block;
 
 	while ((toppar = this->toppar_list.get_next()) != NULL)
 	{
@@ -2211,11 +2210,7 @@ int KafkaRequest::encode_produce(struct iovec vectors[], int max)
 			append_i32(record_header, batch_length);
 			append_i32(record_header, 0);
 			append_i8(record_header, 2); //magic
-
-			uint32_t crc_32 = 0;
-			size_t crc32_offset = record_header.size();
-
-			append_i32(record_header, crc_32);
+			append_i32(record_header, 0);
 			append_i16(record_header, this->config.get_compress_type());
 			append_i32(record_header, batch_cnt - 1);
 			append_i64(record_header, first_timestamp);
@@ -2225,27 +2220,26 @@ int KafkaRequest::encode_produce(struct iovec vectors[], int max)
 			append_i32(record_header, -1);
 			append_i32(record_header, batch_cnt);
 
-			KafkaBlock *header_block = new KafkaBlock;
-
-			if (!header_block->set_block((void *)record_header.c_str(),
-										 record_header.size()))
+			block = new KafkaBlock;
+			if (!block->set_block((void *)record_header.c_str(), record_header.size()))
 			{
-				delete header_block;
+				delete block;
 				return -1;
 			}
 
-			char *crc_ptr = (char *)header_block->get_block() + crc32_offset;
+			size_t crc32_offset = 8 + 4 + 4 + 1;
+			char *crc_ptr = (char *)block->get_block() + crc32_offset;
+			uint32_t crc_32 = crc32c_start();
 
-			this->serialized.insert_list(header_block);
+			this->serialized.insert_list(block);
 
-			crc_32 = crc32c(crc_32, (const void *)(crc_ptr + 4),
-							header_block->get_len() - crc32_offset - 4);
+			crc_32 = crc32c_continue(crc_ptr + 4, block->get_len() - crc32_offset - 4, crc_32);
 
 			this->serialized.block_insert_rewind();
-			KafkaBlock *block;
 			while ((block = this->serialized.get_block_insert_next()) != NULL)
-				crc_32 = crc32c(crc_32, block->get_block(), block->get_len());
+				crc_32 = crc32c_continue(block->get_block(), block->get_len(), crc_32);
 
+			crc_32 = crc32c_finish(crc_32);
 			*(uint32_t *)crc_ptr = htonl(crc_32);
 			*(uint32_t *)recordset_size_ptr = htonl(batch_length + 4 + 8);
 		}
@@ -2291,23 +2285,19 @@ int KafkaRequest::encode_produce(struct iovec vectors[], int max)
 							   wrap_header.size() - crc32_offset - 4);
 
 				this->serialized.block_insert_rewind();
-				KafkaBlock *block;
-
 				while ((block = this->serialized.get_block_insert_next()) != NULL)
 					crc_32 = crc32(crc_32, (Bytef *)block->get_block(), block->get_len());
 
 				*(uint32_t *)crc_ptr = htonl(crc_32);
 
-				KafkaBlock *wrap_block =  new KafkaBlock;
-
-				if (!wrap_block->set_block((void *)wrap_header.c_str(),
-										   wrap_header.size()))
+				block =  new KafkaBlock;
+				if (!block->set_block((void *)wrap_header.c_str(), wrap_header.size()))
 				{
-					delete wrap_block;
+					delete block;
 					return -1;
 				}
 
-				this->serialized.insert_list(wrap_block);
+				this->serialized.insert_list(block);
 				*(uint32_t *)recordset_size_ptr = htonl(message_size + 8 + 4);
 			}
 			else
@@ -2324,8 +2314,7 @@ int KafkaRequest::encode_produce(struct iovec vectors[], int max)
 	vectors[0].iov_base = (void *)this->msgbuf.c_str();
 	vectors[0].iov_len = this->msgbuf.size();
 
-	KafkaBlock *block = this->serialized.get_block_first();
-
+	block = this->serialized.get_block_first();
 	while (block)
 	{
 		this->stream->append_nocopy((const char *)block->get_block(),
@@ -3174,8 +3163,8 @@ int KafkaResponse::parse_fetch(void **buf, size_t *size)
 	{
 		int16_t error;
 		int32_t sessionid;
-		parse_i16(buf, size, &error);
-		parse_i32(buf, size, &sessionid);
+		CHECK_RET(parse_i16(buf, size, &error));
+		CHECK_RET(parse_i32(buf, size, &sessionid));
 	}
 
 	int32_t topic_cnt;

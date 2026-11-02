@@ -51,7 +51,7 @@ json_array_t *json_value_array(const json_value_t *val);
 
 const json_value_t *json_object_find(const char *name,
 									 const json_object_t *obj);
-int json_object_size(const json_object_t *obj);
+size_t json_object_size(const json_object_t *obj);
 const char *json_object_next_name(const char *name,
 								  const json_object_t *obj);
 const json_value_t *json_object_next_value(const json_value_t *val,
@@ -60,6 +60,8 @@ const char *json_object_prev_name(const char *name,
 								  const json_object_t *obj);
 const json_value_t *json_object_prev_value(const json_value_t *val,
 										   const json_object_t *obj);
+const char *json_object_value_name(const json_value_t *val,
+								   const json_object_t *obj);
 const json_value_t *json_object_append(json_object_t *obj,
 									   const char *name,
 									   int type, ...);
@@ -74,7 +76,7 @@ const json_value_t *json_object_insert_before(const json_value_t *val,
 json_value_t *json_object_remove(const json_value_t *val,
 								 json_object_t *obj);
 
-int json_array_size(const json_array_t *arr);
+size_t json_array_size(const json_array_t *arr);
 const json_value_t *json_array_next_value(const json_value_t *val,
 										  const json_array_t *arr);
 const json_value_t *json_array_prev_value(const json_value_t *val,

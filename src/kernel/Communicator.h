@@ -26,12 +26,16 @@
 #include <stddef.h>
 #include <pthread.h>
 #include <openssl/ssl.h>
-#include "list.h"
+#include "StreamReply.h"
 #include "poller.h"
+#include "list.h"
 
+struct CommConnEntry;
 class CommConnection
 {
 public:
+	CommConnEntry *entry = nullptr;
+
 	virtual ~CommConnection() { }
 };
 
@@ -92,6 +96,7 @@ public:
 	virtual ~CommTarget() { }
 	friend class CommServiceTarget;
 	friend class Communicator;
+	friend class StreamReply;
 };
 
 class CommMessageOut
@@ -116,10 +121,20 @@ protected:
 	/* In append(), reset the begin time of receiving to current time. */
 	virtual void renew();
 
+	/* Return the deepest wrapped message. */
+	virtual CommMessageIn *inner() { return this; }
+
 private:
 	struct CommConnEntry *entry;
 
 public:
+public:
+	long long seq{0};                      /* only channel */
+	class CommSession *session = nullptr; /* only channel */
+
+	void set_seq(long long seq) { this->seq = seq; }
+	long long get_seq() const { return this->seq; }
+
 	virtual ~CommMessageIn() { }
 	friend class Communicator;
 };
@@ -137,33 +152,47 @@ private:
 	virtual int send_timeout() { return -1; }
 	virtual int receive_timeout() { return -1; }
 	virtual int keep_alive_timeout() { return 0; }
-	virtual int first_timeout() { return 0; }	/* for client session only. */
+	virtual int first_timeout() { return 0; }
+
 	virtual void handle(int state, int error) = 0;
+
+public:
+	class StreamReply *start_stream_reply(bool chunked = false);
+public:
+	long long get_seq() const { return this->seq; }
+	void set_seq(long long seq) { this->seq = seq; }
 
 protected:
 	CommTarget *get_target() const { return this->target; }
 	CommConnection *get_connection() const { return this->conn; }
 	CommMessageOut *get_message_out() const { return this->out; }
 	CommMessageIn *get_message_in() const { return this->in; }
-	long long get_seq() const { return this->seq; }
+
+	/* for client channel only */
+	virtual bool is_channel() { return false; }
+	CommMessageOut **get_out() { return &this->out; }
+	CommMessageIn **get_in() { return &this->in; }
+	CommConnection **get_conn() { return &this->conn; }
+
+protected:
+	CommTarget *target;
 
 private:
-	CommTarget *target;
 	CommConnection *conn;
 	CommMessageOut *out;
 	CommMessageIn *in;
 	long long seq;
-
 private:
 	struct timespec begin_time;
 	int timeout;
 	int passive;
 
 public:
-	CommSession() { this->passive = 0; }
+	CommSession() : target(nullptr), conn(nullptr), out(nullptr), in(nullptr), seq(0), timeout(0), passive(0) { }
 	virtual ~CommSession();
 	friend class CommMessageIn;
 	friend class Communicator;
+	friend class StreamReply;
 };
 
 class CommService
@@ -174,6 +203,8 @@ public:
 	void deinit();
 
 	int drain(int max);
+
+	virtual bool is_channel() { return false; }
 
 public:
 	void get_addr(const struct sockaddr **addr, socklen_t *addrlen) const
@@ -227,7 +258,7 @@ private:
 	int ref;
 
 private:
-	struct list_head alive_list;
+	struct list_head keep_alive_list;
 	pthread_mutex_t mutex;
 
 public:
@@ -261,6 +292,17 @@ public:
 # include "IOService_thread.h"
 #endif
 
+class CommEventHandler
+{
+private:
+	virtual void schedule(void (*routine)(void *), void *context) = 0;
+	virtual void wait() = 0;
+
+public:
+	virtual ~CommEventHandler() { }
+	friend class Communicator;
+};
+
 class Communicator
 {
 public:
@@ -272,6 +314,7 @@ public:
 
 	int push(const void *buf, size_t size, CommSession *session);
 
+
 	int shutdown(CommSession *session);
 
 	int bind(CommService *service);
@@ -282,16 +325,29 @@ public:
 
 	int io_bind(IOService *service);
 	void io_unbind(IOService *service);
+	int channel_send_one(CommSession *session);
+	void channel_shutdown(CommSession *session);
+
 
 public:
 	int is_handler_thread() const;
+
 	int increase_handler_thread();
+	int decrease_handler_thread();
+
+public:
+	void customize_event_handler(CommEventHandler *handler);
 
 private:
 	struct __mpoller *mpoller;
 	struct __msgqueue *msgqueue;
 	struct __thrdpool *thrdpool;
 	int stop_flag;
+
+private:
+	CommEventHandler *event_handler;
+	int channel_send_callback(CommSession *session);
+
 
 private:
 	int create_poller(size_t poller_threads);
@@ -307,6 +363,26 @@ private:
 	int send_message_async(struct iovec vectors[], int cnt,
 						   struct CommConnEntry *entry);
 
+	int send_message_loop(struct iovec vectors[], int cnt,
+						  struct CommConnEntry *entry);
+	int send_message_done(struct CommConnEntry *entry);
+	static StreamReply *start_stream_reply(CommSession *session, bool chunked);
+	static int stream_submit(StreamReply *stream, const struct iovec *iov,
+							 int iovcnt, bool finish,
+							 void (*callback)(void *, int), void *context);
+	static void stream_abort(StreamReply *stream);
+	static int stream_set_close_callback(StreamReply *stream,
+										 void (*callback)(void *, int),
+										 void *context);
+	static bool stream_clear_close_callback(StreamReply *stream);
+	void stream_result(struct poller_result *res);
+	static int stream_arm(StreamReply::Impl *impl, const struct iovec *iov, int count, bool replace);
+	static int stream_watch(StreamReply::Impl *impl);
+	static void stream_fail(StreamReply::Impl *impl, int error);
+	static void stream_release(StreamReply::Impl *impl);
+	static void stream_destroy(CommSession *session);
+	bool stream_reply_done(CommSession *session);
+
 	int send_message(struct CommConnEntry *entry);
 
 	int request_new_conn(CommSession *session, CommTarget *target);
@@ -316,6 +392,8 @@ private:
 
 	int reply_reliable(CommSession *session, CommTarget *target);
 	int reply_unreliable(CommSession *session, CommTarget *target);
+
+	void handle_poller_result(struct poller_result *res);
 
 	void handle_incoming_request(struct poller_result *res);
 	void handle_incoming_reply(struct poller_result *res);
@@ -353,10 +431,8 @@ private:
 	static int first_timeout_send(CommSession *session);
 	static int first_timeout_recv(CommSession *session);
 
-	static int append_request(const void *buf, size_t *size,
+	static int append_message(const void *buf, size_t *size,
 							  poller_message_t *msg);
-	static int append_reply(const void *buf, size_t *size,
-							poller_message_t *msg);
 
 	static poller_message_t *create_request(void *context);
 	static poller_message_t *create_reply(void *context);
@@ -374,8 +450,16 @@ private:
 
 	static void callback(struct poller_result *res, void *context);
 
+private:
+	static void event_handler_routine(void *context);
+
+	static void callback_custom(struct poller_result *res, void *context);
+
 public:
 	virtual ~Communicator() { }
+	friend class CommSession;
+	friend class StreamReply;
+	friend class CommServiceTarget;
 };
 
 #endif

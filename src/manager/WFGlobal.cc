@@ -18,6 +18,7 @@
            Liu Kai (liukaidx@sogou-inc.com)
 */
 
+#include <netinet/in.h>
 #include <arpa/inet.h>
 #include <unistd.h>
 #include <signal.h>
@@ -30,10 +31,6 @@
 #include <mutex>
 #include <condition_variable>
 #include <openssl/ssl.h>
-#include <openssl/err.h>
-#include <openssl/engine.h>
-#include <openssl/conf.h>
-#include <openssl/crypto.h>
 #include "CommScheduler.h"
 #include "Executor.h"
 #include "WFResourcePool.h"
@@ -82,19 +79,31 @@ public:
 
 		sync_mutex_.lock();
 		inc = ++sync_count_ > sync_max_;
-
 		if (inc)
 			sync_max_ = sync_count_;
+
 		sync_mutex_.unlock();
 		if (inc)
-			WFGlobal::get_scheduler()->increase_handler_thread();
+			WFGlobal::increase_handler_thread();
 	}
 
 	void sync_operation_end()
 	{
+		int dec = 0;
+
 		sync_mutex_.lock();
-		sync_count_--;
+		if (--sync_count_ < (sync_max_ + 1) / 2)
+		{
+			dec = sync_max_ - 2 * sync_count_;
+			sync_max_ -= dec;
+		}
+
 		sync_mutex_.unlock();
+		while (dec > 0)
+		{
+			WFGlobal::decrease_handler_thread();
+			dec--;
+		}
 	}
 
 private:
@@ -164,18 +173,6 @@ __WFGlobal::__WFGlobal()
 	sync_max_ = 0;
 }
 
-#if OPENSSL_VERSION_NUMBER < 0x10100000L
-static std::mutex *__ssl_mutex;
-
-static void ssl_locking_callback(int mode, int type, const char* file, int line)
-{
-	if (mode & CRYPTO_LOCK)
-		__ssl_mutex[type].lock();
-	else if (mode & CRYPTO_UNLOCK)
-		__ssl_mutex[type].unlock();
-}
-#endif
-
 class __SSLManager
 {
 public:
@@ -191,15 +188,6 @@ public:
 private:
 	__SSLManager()
 	{
-#if OPENSSL_VERSION_NUMBER < 0x10100000L
-		__ssl_mutex = new std::mutex[CRYPTO_num_locks()];
-		CRYPTO_set_locking_callback(ssl_locking_callback);
-		SSL_library_init();
-		SSL_load_error_strings();
-		//ERR_load_crypto_strings();
-		//OpenSSL_add_all_algorithms();
-#endif
-
 		ssl_client_ctx_ = SSL_CTX_new(SSLv23_client_method());
 		if (ssl_client_ctx_ == NULL)
 			abort();
@@ -208,29 +196,6 @@ private:
 	~__SSLManager()
 	{
 		SSL_CTX_free(ssl_client_ctx_);
-
-#if OPENSSL_VERSION_NUMBER < 0x10100000L
-		//free ssl to avoid memory leak
-		FIPS_mode_set(0);
-		CRYPTO_set_locking_callback(NULL);
-# ifdef CRYPTO_LOCK_ECDH
-		CRYPTO_THREADID_set_callback(NULL);
-# else
-		CRYPTO_set_id_callback(NULL);
-# endif
-		ENGINE_cleanup();
-		CONF_modules_unload(1);
-		ERR_free_strings();
-		EVP_cleanup();
-# ifdef CRYPTO_LOCK_ECDH
-		ERR_remove_thread_state(NULL);
-# else
-		ERR_remove_state(0);
-# endif
-		CRYPTO_cleanup_all_ex_data();
-		sk_SSL_COMP_free(SSL_COMP_get_compression_methods());
-		delete []__ssl_mutex;
-#endif
 	}
 
 private:
@@ -383,10 +348,19 @@ inline IOService *__CommManager::get_io_service()
 		if (!fio_flag_)
 		{
 			int maxevents = WFGlobal::get_global_settings()->fio_max_events;
+			int n = 65536;
 
 			fio_service_ = new __FileIOService(&scheduler_);
-			if (fio_service_->init(maxevents) < 0)
-				abort();
+			while (fio_service_->init(maxevents) < 0)
+			{
+				if ((errno != EAGAIN && errno != EINVAL) || maxevents <= 16)
+					abort();
+
+				while (n >= maxevents)
+					n /= 2;
+
+				maxevents = n;
+			}
 
 			if (fio_service_->bind() < 0)
 				abort();
@@ -421,7 +395,7 @@ private:
 	{
 		int compute_threads = WFGlobal::get_global_settings()->compute_threads;
 
-		if (compute_threads <= 0)
+		if (compute_threads < 0)
 			compute_threads = sysconf(_SC_NPROCESSORS_ONLN);
 
 		if (compute_executor_.init(compute_threads) < 0)
@@ -437,6 +411,8 @@ private:
 			kv.second->deinit();
 			delete kv.second;
 		}
+
+		pthread_rwlock_destroy(&rwlock_);
 	}
 
 private:

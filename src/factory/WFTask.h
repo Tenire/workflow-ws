@@ -68,6 +68,9 @@ public:
 	INPUT *get_input() { return &this->input; }
 	OUTPUT *get_output() { return &this->output; }
 
+	const INPUT *get_input() const { return &this->input; }
+	const OUTPUT *get_output() const { return &this->output; }
+
 public:
 	void *user_data;
 
@@ -134,6 +137,9 @@ public:
 	REQ *get_req() { return &this->req; }
 	RESP *get_resp() { return &this->resp; }
 
+	const REQ *get_req() const { return &this->req; }
+	const RESP *get_resp() const { return &this->resp; }
+
 public:
 	void *user_data;
 
@@ -181,6 +187,13 @@ public:
 	/* Push reply data synchronously. */
 	virtual int push(const void *buf, size_t size)
 	{
+		if (this->state != WFT_STATE_TOREPLY &&
+			this->state != WFT_STATE_NOREPLY)
+		{
+			errno = ENOENT;
+			return -1;
+		}
+
 		return this->scheduler->push(buf, size, this);
 	}
 
@@ -198,6 +211,12 @@ public:
 		default:
 			return true;
 		}
+	}
+
+public:
+	void set_prepare(std::function<void (WFNetworkTask<REQ, RESP> *)> prep)
+	{
+		this->prepare = std::move(prep);
 	}
 
 public:
@@ -219,6 +238,7 @@ protected:
 	int watch_timeo;
 	REQ req;
 	RESP resp;
+	std::function<void (WFNetworkTask<REQ, RESP> *)> prepare;
 	std::function<void (WFNetworkTask<REQ, RESP> *)> callback;
 
 protected:
@@ -317,6 +337,8 @@ public:
 
 public:
 	ARGS *get_args() { return &this->args; }
+
+	const ARGS *get_args() const { return &this->args; }
 
 	long get_retval() const
 	{
@@ -478,7 +500,7 @@ public:
 	virtual void send(void *msg)
 	{
 		*this->mailbox = msg;
-		if (this->flag.exchange(true))
+		if (this->flag.exchange(1))
 		{
 			this->state = WFT_STATE_SUCCESS;
 			this->subtask_done();
@@ -496,7 +518,7 @@ public:
 protected:
 	virtual void dispatch()
 	{
-		if (this->flag.exchange(true))
+		if (this->flag.exchange(1))
 		{
 			this->state = WFT_STATE_SUCCESS;
 			this->subtask_done();
@@ -516,20 +538,20 @@ protected:
 
 protected:
 	void **mailbox;
-	std::atomic<bool> flag;
+	std::atomic<int> flag;
 	std::function<void (WFMailboxTask *)> callback;
 
 public:
 	WFMailboxTask(void **mailbox,
 				  std::function<void (WFMailboxTask *)>&& cb) :
-		flag(false),
+		flag(0),
 		callback(std::move(cb))
 	{
 		this->mailbox = mailbox;
 	}
 
 	WFMailboxTask(std::function<void (WFMailboxTask *)>&& cb) :
-		flag(false),
+		flag(0),
 		callback(std::move(cb))
 	{
 		this->mailbox = &this->user_data;
@@ -550,7 +572,7 @@ public:
 		if (this->message.compare_exchange_strong(tmp, msg) && msg)
 		{
 			ret = 1;
-			if (this->flag.exchange(true))
+			if (this->flag.exchange(1))
 			{
 				this->state = WFT_STATE_SUCCESS;
 				this->subtask_done();
@@ -583,7 +605,7 @@ public:
 protected:
 	virtual void dispatch()
 	{
-		if (this->flag.exchange(true))
+		if (this->flag.exchange(1))
 		{
 			this->state = WFT_STATE_SUCCESS;
 			this->subtask_done();
@@ -614,7 +636,7 @@ protected:
 
 protected:
 	std::atomic<void *> message;
-	std::atomic<bool> flag;
+	std::atomic<int> flag;
 	std::atomic<size_t> nleft;
 	std::function<void (WFSelectorTask *)> callback;
 
@@ -622,7 +644,7 @@ public:
 	WFSelectorTask(size_t candidates,
 				   std::function<void (WFSelectorTask *)>&& cb) :
 		message(NULL),
-		flag(false),
+		flag(0),
 		nleft(candidates + 1),
 		callback(std::move(cb))
 	{
@@ -638,7 +660,7 @@ public:
 	virtual void signal(void *msg)
 	{
 		*this->msgbuf = msg;
-		if (this->flag.exchange(true))
+		if (this->flag.exchange(1))
 			this->subtask_done();
 	}
 
@@ -647,25 +669,25 @@ protected:
 	{
 		series_of(this)->push_front(this->task);
 		this->task = NULL;
-		if (this->flag.exchange(true))
+		if (this->flag.exchange(1))
 			this->subtask_done();
 	}
 
 protected:
-	std::atomic<bool> flag;
+	std::atomic<int> flag;
 	SubTask *task;
 	void **msgbuf;
 
 public:
 	WFConditional(SubTask *task, void **msgbuf) :
-		flag(false)
+		flag(0)
 	{
 		this->task = task;
 		this->msgbuf = msgbuf;
 	}
 
 	WFConditional(SubTask *task) :
-		flag(false)
+		flag(0)
 	{
 		this->task = task;
 		this->msgbuf = &this->user_data;
@@ -742,6 +764,7 @@ public:
 		this->create = std::move(create);
 	}
 
+public:
 	void set_callback(std::function<void (WFRepeaterTask *)> cb)
 	{
 		this->callback = std::move(cb);

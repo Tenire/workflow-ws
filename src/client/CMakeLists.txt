@@ -1,9 +1,17 @@
-cmake_minimum_required(VERSION 3.6)
+cmake_minimum_required(VERSION 3.10)
 project(client)
 
 set(SRC
 	WFDnsClient.cc
+	WFHttpChunkedClient.cc
 )
+
+if (NOT REDIS STREQUAL "n")
+	set(SRC
+		${SRC}
+		WFRedisSubscriber.cc
+	)
+endif ()
 
 if (NOT MYSQL STREQUAL "n")
 	set(SRC

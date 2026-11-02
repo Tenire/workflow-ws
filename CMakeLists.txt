@@ -1,11 +1,11 @@
-cmake_minimum_required(VERSION 3.6)
+cmake_minimum_required(VERSION 3.10)
 
 set(CMAKE_BUILD_TYPE RelWithDebInfo CACHE STRING "build type")
 set(CMAKE_SKIP_RPATH TRUE)
 
 project(
 	workflow
-	VERSION 0.11.4
+	VERSION 1.1.0
 	LANGUAGES C CXX
 )
 
@@ -38,7 +38,6 @@ macro(makeLink src dest target)
 	add_custom_command(
 		TARGET ${target} PRE_BUILD
 		COMMAND ${CMAKE_COMMAND} -E copy_if_different ${src} ${dest}
-		DEPENDS ${dest}
 	)
 endmacro()
 
@@ -63,13 +62,11 @@ message("CMAKE_CXX_FLAGS_RELEASE is ${CMAKE_CXX_FLAGS_RELEASE}")
 message("CMAKE_CXX_FLAGS_RELWITHDEBINFO is ${CMAKE_CXX_FLAGS_RELWITHDEBINFO}")
 message("CMAKE_CXX_FLAGS_MINSIZEREL is ${CMAKE_CXX_FLAGS_MINSIZEREL}")
 
-if (WIN32)
-	set(CMAKE_C_FLAGS   "${CMAKE_C_FLAGS}   /MP /wd4200")
-	set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /MP /wd4200 /std:c++14")
-else ()
-	set(CMAKE_C_FLAGS   "${CMAKE_C_FLAGS}   -Wall -fPIC -pipe -std=gnu90")
-	set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -fPIC -pipe -std=c++11 -fno-exceptions -Wno-invalid-offsetof")
-endif ()
+set(CMAKE_C_FLAGS   "${CMAKE_C_FLAGS}   -Wall -fPIC -pipe -std=gnu90")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -fPIC -pipe -std=c++11 -fno-exceptions -Wno-invalid-offsetof")
+if (APPLE)
+	set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-deprecated-declarations")
+endif()
 
 add_subdirectory(src)
 

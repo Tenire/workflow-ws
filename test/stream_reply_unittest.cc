@@ -102,6 +102,8 @@ struct Producer
 	int task_state = WFT_STATE_UNDEFINED;
 	int task_error = 0;
 	long long sequence_number = -1;
+	int close_calls = 0;
+	int close_error = 0;
 
 	template<class Predicate>
 	bool wait(Predicate predicate)
@@ -129,6 +131,29 @@ struct Producer
 		if (advance)
 			self->submit(index + 1);
 	}
+	static void close_completed(void *context, int error)
+	{
+		auto *self = static_cast<Producer *>(context);
+		{
+			std::lock_guard<std::mutex> lock(self->mutex);
+			self->close_calls++;
+			self->close_error = error;
+		}
+		self->cond.notify_all();
+	}
+
+	static void close_release(void *context, int error)
+	{
+		auto *self = static_cast<Producer *>(context);
+		{
+			std::lock_guard<std::mutex> lock(self->mutex);
+			self->close_calls++;
+			self->close_error = error;
+		}
+		self->cond.notify_all();
+		self->release();
+	}
+
 
 	void submit(unsigned int index)
 	{
@@ -814,6 +839,236 @@ TEST(stream_reply_unittest, tls_slow_client_send_timeout_completes_borrowed_batc
 	EXPECT_EQ(producer->calls[0], 1);
 	EXPECT_EQ(producer->task_state, WFT_STATE_SYS_ERROR);
 	EXPECT_EQ(producer->task_error, ETIMEDOUT);
+}
+TEST(stream_reply_unittest, close_callback_rejects_invalid_and_duplicate_registration_and_guards_finish)
+{
+	auto producer = std::make_shared<Producer>("/close-reg", Producer::idle);
+	Server server{producer};
+	ASSERT_TRUE(server.start());
+	Client client;
+	ASSERT_TRUE(client.connect(server));
+	ASSERT_TRUE(client.request(producer->path));
+	ASSERT_TRUE(producer->wait([&] { return producer->ready; }));
+	ASSERT_EQ(producer->start_error, 0);
+	errno = 0;
+	EXPECT_EQ(producer->stream->set_close_callback(nullptr, nullptr), -1);
+	EXPECT_EQ(errno, EINVAL);
+
+	EXPECT_EQ(producer->stream->set_close_callback(Producer::close_completed, producer.get()), 0);
+
+	errno = 0;
+	EXPECT_EQ(producer->stream->set_close_callback(Producer::close_completed, producer.get()), -1);
+	EXPECT_EQ(errno, EBUSY);
+
+	errno = 0;
+	EXPECT_EQ(producer->stream->finish(Producer::completed, &producer->completions[2]), -1);
+	EXPECT_EQ(errno, EBUSY);
+
+	EXPECT_TRUE(producer->stream->clear_close_callback());
+	EXPECT_FALSE(producer->stream->clear_close_callback());
+
+	EXPECT_EQ(producer->stream->finish(Producer::completed, &producer->completions[2]), 0);
+	ASSERT_TRUE(producer->wait([&] { return producer->calls[2] != 0; }));
+	EXPECT_EQ(producer->calls[2], 1);
+	EXPECT_EQ(producer->errors[2], 0);
+
+	producer->release();
+	ASSERT_TRUE(producer->wait([&] { return producer->task_calls != 0; }));
+	std::lock_guard<std::mutex> lock(producer->mutex);
+	EXPECT_EQ(producer->task_calls, 1);
+	EXPECT_EQ(producer->task_state, WFT_STATE_SUCCESS);
+	EXPECT_EQ(producer->task_error, 0);
+	EXPECT_EQ(producer->close_calls, 0);
+}
+
+TEST(stream_reply_unittest, close_callback_notifies_idle_producer_on_peer_close)
+{
+	auto producer = std::make_shared<Producer>("/close-peer", Producer::idle);
+	Server server{producer};
+	ASSERT_TRUE(server.start());
+	Client client;
+	ASSERT_TRUE(client.connect(server));
+	ASSERT_TRUE(client.request(producer->path));
+	ASSERT_TRUE(producer->wait([&] { return producer->ready; }));
+	ASSERT_EQ(producer->start_error, 0);
+
+	EXPECT_EQ(producer->stream->set_close_callback(Producer::close_release, producer.get()), 0);
+
+	std::string header = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n";
+	ASSERT_EQ(client.receive(header.size()), header);
+
+	// Peer disconnects while producer is idle
+	client.close();
+
+	// Producer close callback is invoked, wakes producer and releases its gate
+	ASSERT_TRUE(producer->wait([&] { return producer->close_calls != 0; }));
+	{
+		std::lock_guard<std::mutex> lock(producer->mutex);
+		EXPECT_EQ(producer->close_calls, 1);
+		EXPECT_NE(producer->close_error, 0);
+	}
+
+	// Task series completes because close_release unblocked the gate
+	ASSERT_TRUE(producer->wait([&] { return producer->task_calls != 0; }));
+	EXPECT_EQ(producer->task_calls, 1);
+
+}
+
+TEST(stream_reply_unittest, close_callback_notifies_idle_producer_on_server_stop)
+{
+	auto producer = std::make_shared<Producer>("/close-stop", Producer::idle);
+	Server server{producer};
+	ASSERT_TRUE(server.start());
+	Client client;
+	ASSERT_TRUE(client.connect(server));
+	ASSERT_TRUE(client.request(producer->path));
+	ASSERT_TRUE(producer->wait([&] { return producer->ready; }));
+	ASSERT_EQ(producer->start_error, 0);
+
+	EXPECT_EQ(producer->stream->set_close_callback(Producer::close_release, producer.get()), 0);
+
+	// Stop server: idle stream must receive close notification and wake producer
+	server.stop();
+
+	ASSERT_TRUE(producer->wait([&] { return producer->close_calls != 0; }));
+	{
+		std::lock_guard<std::mutex> lock(producer->mutex);
+		EXPECT_EQ(producer->close_calls, 1);
+		EXPECT_EQ(producer->close_error, ECANCELED);
+	}
+
+	ASSERT_TRUE(producer->wait([&] { return producer->task_calls != 0; }));
+	EXPECT_TRUE(server.wait_stopped());
+	EXPECT_EQ(producer->task_calls, 1);
+}
+
+TEST(stream_reply_unittest, close_callback_notifies_producer_on_abort)
+{
+	auto producer = std::make_shared<Producer>("/close-abort", Producer::idle);
+	Server server{producer};
+	ASSERT_TRUE(server.start());
+	Client client;
+	ASSERT_TRUE(client.connect(server));
+	ASSERT_TRUE(client.request(producer->path));
+	ASSERT_TRUE(producer->wait([&] { return producer->ready; }));
+	ASSERT_EQ(producer->start_error, 0);
+
+	EXPECT_EQ(producer->stream->set_close_callback(Producer::close_release, producer.get()), 0);
+
+	producer->stream->abort();
+
+	ASSERT_TRUE(producer->wait([&] { return producer->close_calls != 0; }));
+	{
+		std::lock_guard<std::mutex> lock(producer->mutex);
+		EXPECT_EQ(producer->close_calls, 1);
+		EXPECT_EQ(producer->close_error, ECANCELED);
+	}
+
+	ASSERT_TRUE(producer->wait([&] { return producer->task_calls != 0; }));
+	EXPECT_EQ(producer->task_calls, 1);
+}
+
+TEST(stream_reply_unittest, close_callback_successful_withdrawal_prevents_invocation)
+{
+	auto producer = std::make_shared<Producer>("/close-withdraw", Producer::idle);
+	Server server{producer};
+	ASSERT_TRUE(server.start());
+	Client client;
+	ASSERT_TRUE(client.connect(server));
+	ASSERT_TRUE(client.request(producer->path));
+	ASSERT_TRUE(producer->wait([&] { return producer->ready; }));
+	ASSERT_EQ(producer->start_error, 0);
+
+	EXPECT_EQ(producer->stream->set_close_callback(Producer::close_completed, producer.get()), 0);
+
+	// Withdraw before peer close
+	EXPECT_TRUE(producer->stream->clear_close_callback());
+
+	std::string header = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n";
+	ASSERT_EQ(client.receive(header.size()), header);
+	client.close();
+
+	ASSERT_TRUE(eventually([&] { return !producer->stream->connected(); }));
+
+	// Close callback must NEVER be called after successful withdrawal
+	{
+		std::lock_guard<std::mutex> lock(producer->mutex);
+		EXPECT_EQ(producer->close_calls, 0);
+	}
+
+	producer->release(true);
+	ASSERT_TRUE(producer->wait([&] { return producer->task_calls != 0; }));
+	EXPECT_EQ(producer->task_calls, 1);
+}
+
+TEST(stream_reply_unittest, close_callback_combined_write_and_close_both_fire_on_error)
+{
+	auto producer = std::make_shared<Producer>("/close-combined", Producer::blocked, false);
+	producer->send_timeout = 10000;
+	Server server{producer};
+	ASSERT_TRUE(server.start());
+	Client client;
+	ASSERT_TRUE(client.connect(server, false, true));
+	ASSERT_TRUE(client.request(producer->path));
+	ASSERT_TRUE(producer->wait([&] { return producer->ready; }));
+	ASSERT_EQ(producer->start_error, 0);
+	ASSERT_EQ(producer->submitted[0], 0);
+
+	// Register close callback while write batch is in flight
+	EXPECT_EQ(producer->stream->set_close_callback(Producer::close_completed, producer.get()), 0);
+
+	// Abort stream
+	producer->stream->abort();
+
+	// Both write callback and close callback must fire with error
+	ASSERT_TRUE(producer->wait([&] { return producer->calls[0] != 0 && producer->close_calls != 0; }));
+	{
+		std::lock_guard<std::mutex> lock(producer->mutex);
+		EXPECT_EQ(producer->calls[0], 1);
+		EXPECT_EQ(producer->errors[0], ECANCELED);
+		EXPECT_EQ(producer->close_calls, 1);
+		EXPECT_EQ(producer->close_error, ECANCELED);
+	}
+
+	producer->release();
+	ASSERT_TRUE(producer->wait([&] { return producer->task_calls != 0; }));
+	EXPECT_EQ(producer->task_calls, 1);
+}
+
+TEST(stream_reply_unittest, close_callback_finish_and_registration_reject_after_terminal_notification)
+{
+	auto producer = std::make_shared<Producer>("/close-terminal-reject", Producer::idle);
+	Server server{producer};
+	ASSERT_TRUE(server.start());
+	Client client;
+	ASSERT_TRUE(client.connect(server));
+	ASSERT_TRUE(client.request(producer->path));
+	ASSERT_TRUE(producer->wait([&] { return producer->ready; }));
+	ASSERT_EQ(producer->start_error, 0);
+
+	EXPECT_EQ(producer->stream->set_close_callback(Producer::close_completed, producer.get()), 0);
+
+	std::string header = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n";
+	ASSERT_EQ(client.receive(header.size()), header);
+	client.close();
+
+	ASSERT_TRUE(producer->wait([&] { return producer->close_calls != 0; }));
+	EXPECT_EQ(producer->close_calls, 1);
+	EXPECT_NE(producer->close_error, 0);
+
+	EXPECT_FALSE(producer->stream->clear_close_callback());
+
+	errno = 0;
+	EXPECT_EQ(producer->stream->set_close_callback(Producer::close_completed, producer.get()), -1);
+	EXPECT_NE(errno, 0);
+
+	errno = 0;
+	EXPECT_EQ(producer->stream->finish(Producer::completed, &producer->completions[2]), -1);
+	EXPECT_NE(errno, 0);
+
+	producer->release(true);
+	ASSERT_TRUE(producer->wait([&] { return producer->task_calls != 0; }));
+	EXPECT_EQ(producer->task_calls, 1);
 }
 
 } // namespace

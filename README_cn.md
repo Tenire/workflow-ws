@@ -29,6 +29,7 @@ int main()
 ~~~
 * 作为万能异步客户端。目前支持``http``，``redis``，``mysql``和``kafka``协议。
   * 轻松构建效率极高的spider。
+  * ``mysql``协议同时也支持``MariaDB``和``TiDB``等数据库。
 * 实现自定义协议client/server，构建自己的RPC系统。
   * [srpc](https://github.com/sogou/srpc)就是以它为基础，作为独立项目开源。支持``srpc``，``brpc``，``trpc``和``thrift``等协议。
 * 构建异步任务流，支持常用的串并联，也支持更加复杂的DAG结构。
@@ -43,7 +44,7 @@ int main()
 * 项目支持``Linux``，``macOS``，``Windows``，``Android``等操作系统。
   *  ``Windows``版以[windows](https://github.com/sogou/workflow/tree/windows)分支发布，使用``iocp``实现异步网络。用户接口与``Linux``版一致。
 * 支持所有CPU平台，包括32或64位``x86``处理器，大端或小端``arm``处理器，国产``loongson``龙芯处理器实测支持。
-* 需要依赖于``OpenSSL``，推荐``OpenSSL 1.1``及以上版本。
+* 需要依赖于``OpenSSL 1.1``或以上版本，也兼容BoringSSL。
   * 不喜欢SSL的用户可以使用[nossl](https://github.com/sogou/workflow/tree/nossl)分支，代码更简洁。
 * 项目使用了``C++11``标准，需要用支持``C++11``的编译器编译。但不依赖``boost``或``asio``。
 * 项目无其它依赖。如需使用``kafka``协议，需自行安装``lz4``，``zstd``和``snappy``几个压缩库。
@@ -127,6 +128,7 @@ sudo dnf install workflow
     * [异步MySQL客户端：mysql_cli](docs/tutorial-12-mysql_cli.md)
     * [异步kafka客户端：kafka_cli](docs/tutorial-13-kafka_cli.md)
     * [异步DNS客户端：dns_cli](docs/tutorial-17-dns_cli.md)
+    * [Redis订阅客户端：redis_subscriber](docs/tutorial-18-redis_subscriber.md)
 
 #### 编程范式
 

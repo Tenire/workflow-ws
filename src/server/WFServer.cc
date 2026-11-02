@@ -19,6 +19,8 @@
 
 #include <sys/types.h>
 #include <sys/socket.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <errno.h>
 #include <unistd.h>
 #include <stdio.h>
@@ -73,8 +75,9 @@ SSL_CTX *WFServerBase::new_ssl_ctx(const char *cert_file, const char *key_file)
 	if (!ssl_ctx)
 		return NULL;
 
-	if (SSL_CTX_use_certificate_file(ssl_ctx, cert_file, SSL_FILETYPE_PEM) > 0 &&
+	if (SSL_CTX_use_certificate_chain_file(ssl_ctx, cert_file) > 0 &&
 		SSL_CTX_use_PrivateKey_file(ssl_ctx, key_file, SSL_FILETYPE_PEM) > 0 &&
+		SSL_CTX_check_private_key(ssl_ctx) > 0 &&
 		SSL_CTX_set_tlsext_servername_callback(ssl_ctx, ssl_ctx_callback) > 0 &&
 		SSL_CTX_set_tlsext_servername_arg(ssl_ctx, this) > 0)
 	{
@@ -174,18 +177,15 @@ int WFServerBase::create_listen_fd()
 
 WFConnection *WFServerBase::new_connection(int accept_fd)
 {
-	if (++this->conn_count <= this->params.max_connections ||
-		this->drain(1) == 1)
+	if (++this->conn_count > this->params.max_connections &&
+		this->drain(1) <= 0)
 	{
-		int reuse = 1;
-		setsockopt(accept_fd, SOL_SOCKET, SO_REUSEADDR,
-				   &reuse, sizeof (int));
-		return new WFServerConnection(&this->conn_count);
+		this->conn_count--;
+		errno = EMFILE;
+		return NULL;
 	}
 
-	this->conn_count--;
-	errno = EMFILE;
-	return NULL;
+	return new WFServerConnection(&this->conn_count);
 }
 
 void WFServerBase::delete_connection(WFConnection *conn)

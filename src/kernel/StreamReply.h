@@ -12,6 +12,8 @@ public:
     int finish(void (*callback)(void *, int), void *context);
     void abort();
     bool connected() const;
+    int set_close_callback(void (*callback)(void *, int), void *context);
+    bool clear_close_callback();
 private:
     Impl *impl;
     explicit StreamReply(Impl *p) : impl(p) { }

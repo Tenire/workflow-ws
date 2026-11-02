@@ -1,5 +1,5 @@
 set_project("workflow")
-set_version("0.11.4")
+set_version("1.1.0")
 
 option("workflow_inc",  {description = "workflow inc", default = "$(projectdir)/_include"})
 option("workflow_lib",  {description = "workflow lib", default = "$(projectdir)/_lib"})
@@ -37,6 +37,9 @@ set_config("buildir", "build.xmake")
 
 add_cflags("-fPIC", "-pipe")
 add_cxxflags("-fPIC", "-pipe", "-Wno-invalid-offsetof")
+if (is_plat("macosx")) then
+    add_cxxflags("-Wno-deprecated-declarations")
+end
 
 includes("src", "test", "benchmark", "tutorial")
 
