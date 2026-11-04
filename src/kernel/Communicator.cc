@@ -90,6 +90,8 @@ struct StreamReply::Impl
 	int references;
 	void (*callback)(void *, int);
 	void *context;
+	void (*close_callback)(void *, int);
+	void *close_context;
 };
 
 
@@ -1081,12 +1083,15 @@ void Communicator::handle_request_result(struct poller_result *res)
 void Communicator::handle_write_result(struct poller_result *res)
 {
 	struct CommConnEntry *entry = (struct CommConnEntry *)res->data.context;
-	free(entry->write_iov);
-	entry->write_iov = NULL;
+
 	if (entry->service)
 		this->stream_result(res);
 	else
+	{
+		free(entry->write_iov);
+		entry->write_iov = NULL;
 		this->handle_request_result(res);
+	}
 }
 
 struct CommConnEntry *Communicator::accept_conn(CommServiceTarget *target,

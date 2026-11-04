@@ -371,6 +371,10 @@ private:
 							 int iovcnt, bool finish,
 							 void (*callback)(void *, int), void *context);
 	static void stream_abort(StreamReply *stream);
+	static int stream_set_close_callback(StreamReply *stream,
+										 void (*callback)(void *, int),
+										 void *context);
+	static bool stream_clear_close_callback(StreamReply *stream);
 	void stream_result(struct poller_result *res);
 	static int stream_arm(StreamReply::Impl *impl, const struct iovec *iov, int count, bool replace);
 	static int stream_watch(StreamReply::Impl *impl);

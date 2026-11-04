@@ -38,15 +38,18 @@ int Communicator::stream_arm(StreamReply::Impl *impl, const struct iovec *iov,
     data.partial_written = __stream_partial_written;
     data.write_iov = copy;
     data.iovcnt = count;
+    struct iovec *previous = entry->write_iov;
+    entry->write_iov = copy;
     int timeout = impl->session->send_timeout();
     int ret = replace ? mpoller_mod(&data, timeout, entry->mpoller) :
                         mpoller_add(&data, timeout, entry->mpoller);
     if (ret < 0)
     {
+        entry->write_iov = previous;
         free(copy);
         return -1;
     }
-    entry->write_iov = copy;
+    free(previous);
     impl->node_active = true;
     return 0;
 }
@@ -154,6 +157,12 @@ int Communicator::stream_submit(StreamReply *stream, const struct iovec *iov,
     StreamReply::Impl *impl = stream->impl;
     CommTarget *target = impl->entry->target;
     pthread_mutex_lock(&target->mutex);
+    if (finish && impl->close_callback)
+    {
+        pthread_mutex_unlock(&target->mutex);
+        errno = EBUSY;
+        return -1;
+    }
     if (impl->error || impl->finished || impl->operation_pending || impl->detached)
     {
         int error = impl->operation_pending ? EBUSY : (impl->error ? impl->error : EPIPE);
@@ -249,6 +258,60 @@ bool StreamReply::connected() const
     return connected;
 }
 
+int Communicator::stream_set_close_callback(StreamReply *stream,
+                                            void (*callback)(void *, int),
+                                            void *context)
+{
+    if (!callback)
+    {
+        errno = EINVAL;
+        return -1;
+    }
+    StreamReply::Impl *impl = stream->impl;
+    CommTarget *target = impl->entry->target;
+    pthread_mutex_lock(&target->mutex);
+    if (impl->close_callback)
+    {
+        pthread_mutex_unlock(&target->mutex);
+        errno = EBUSY;
+        return -1;
+    }
+    if (impl->error || impl->finishing || impl->finished || impl->detached)
+    {
+        int error = impl->error ? impl->error : EPIPE;
+        pthread_mutex_unlock(&target->mutex);
+        errno = error;
+        return -1;
+    }
+    impl->close_callback = callback;
+    impl->close_context = context;
+    pthread_mutex_unlock(&target->mutex);
+    return 0;
+}
+
+bool Communicator::stream_clear_close_callback(StreamReply *stream)
+{
+    StreamReply::Impl *impl = stream->impl;
+    CommTarget *target = impl->entry->target;
+    pthread_mutex_lock(&target->mutex);
+    bool removed = (impl->close_callback != NULL);
+    impl->close_callback = NULL;
+    impl->close_context = NULL;
+    pthread_mutex_unlock(&target->mutex);
+    return removed;
+}
+
+int StreamReply::set_close_callback(void (*callback)(void *, int), void *context)
+{
+    return Communicator::stream_set_close_callback(this, callback, context);
+}
+
+bool StreamReply::clear_close_callback()
+{
+    return Communicator::stream_clear_close_callback(this);
+}
+
+
 void Communicator::stream_result(struct poller_result *res)
 {
     CommConnEntry *entry = (CommConnEntry *)res->data.context;
@@ -256,12 +319,27 @@ void Communicator::stream_result(struct poller_result *res)
     pthread_mutex_lock(&target->mutex);
     if (!entry->stream_reply)
     {
+        if (res->data.operation == PD_OP_WRITE)
+        {
+            free(entry->write_iov);
+            entry->write_iov = NULL;
+        }
         pthread_mutex_unlock(&target->mutex);
         if (res->data.operation == PD_OP_READ)
             this->handle_incoming_request(res);
         else
             this->handle_reply_result(res);
         return;
+    }
+    if (res->data.operation == PD_OP_WRITE && res->state == PR_ST_MODIFIED)
+    {
+        pthread_mutex_unlock(&target->mutex);
+        return;
+    }
+    if (res->data.operation == PD_OP_WRITE)
+    {
+        free(entry->write_iov);
+        entry->write_iov = NULL;
     }
     StreamReply::Impl *impl = entry->stream_reply->impl;
     __sync_add_and_fetch(&impl->references, 1); /* callback may destroy task */
@@ -294,11 +372,22 @@ void Communicator::stream_result(struct poller_result *res)
     void *context = impl->context;
     impl->callback = NULL;
     impl->operation_pending = false;
+    void (*close_callback)(void *, int) = NULL;
+    void *close_context = NULL;
+    if (error)
+    {
+        close_callback = impl->close_callback;
+        close_context = impl->close_context;
+        impl->close_callback = NULL;
+        impl->close_context = NULL;
+    }
     if (!error && impl->finishing)
         impl->finished = true;
     pthread_mutex_unlock(&target->mutex);
     if (callback)
         callback(context, error);
+    if (close_callback)
+        close_callback(close_context, error);
     if (error)
     {
         /* Final node owns the original transport reference; the handle's
